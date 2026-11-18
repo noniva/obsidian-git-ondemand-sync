@@ -1,0 +1,29 @@
+{
+  "name": "gitlab-ondemand-sync",
+  "version": "0.1.0",
+  "description": "Obsidian plugin that syncs text-only files with a private GitLab repository and loads/uploads images on-demand in memory with zero mobile disk storage.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs --watch",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "obsidian",
+    "gitlab",
+    "sync",
+    "mobile",
+    "images"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.26.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.7.2",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,19 @@
+/* GitLab On-Demand Sync styles */
+.gitlab-ondemand-image-wrapper {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.gitlab-ondemand-image {
+  max-width: 100%;
+  height: auto;
+}
+
+.gitlab-ondemand-image-loading {
+  opacity: 0.6;
+}
+
+.gitlab-ondemand-image-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+}
