@@ -202,8 +202,6 @@ export class SyncEngine {
    * and adopts converged remote file states from the target branch.
    */
   async clearConflictBranch(): Promise<void> {
-    this.state.activeConflictBranch = null;
-
     const headSha = await this.client.getBranchHead(this.settings.branch);
     const tree = await this.client.getTreeRecursive(headSha);
 
@@ -219,6 +217,7 @@ export class SyncEngine {
       localHashes[path] = await sha256Hex(content);
     }
 
+    const convergedUpdates: Array<[string, { blobSha: string; contentHash: string }]> = [];
     for (const entry of tree) {
       if (
         entry.type !== 'blob' ||
@@ -237,13 +236,20 @@ export class SyncEngine {
       }
       const remoteText = await this.client.getRawText(entry.path, headSha);
       if (typeof remoteText === 'string' && (await sha256Hex(remoteText)) === localHash) {
-        this.state.files[entry.path] = {
-          blobSha: entry.id,
-          contentHash: localHash,
-        };
+        convergedUpdates.push([
+          entry.path,
+          {
+            blobSha: entry.id,
+            contentHash: localHash,
+          },
+        ]);
       }
     }
 
+    for (const [path, fileState] of convergedUpdates) {
+      this.state.files[path] = fileState;
+    }
+    this.state.activeConflictBranch = null;
     this.state.lastSyncedCommitSha = headSha;
     await this.saveState();
   }
@@ -262,7 +268,7 @@ export class SyncEngine {
     const convergedPaths = new Set<string>();
     for (const path of plan.conflicts) {
       const localHash = localHashes[path];
-      if (localHash === undefined) {
+      if (localHash === undefined || remoteTextFiles[path] === undefined) {
         continue;
       }
       const remoteText = await this.client.getRawText(path, headSha);

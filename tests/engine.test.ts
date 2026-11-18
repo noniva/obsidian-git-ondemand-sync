@@ -429,4 +429,73 @@ describe('SyncEngine', () => {
       'attachments/pasted-during-sync.png',
     ]);
   });
+
+  it('does not call getRawText on remote-del-local-edit conflict and pushes to mobile-conflict branch', async () => {
+    const files: Record<string, string> = { 'deleted-remotely.md': 'local edit' };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: { 'deleted-remotely.md': { blobSha: 'r0', contentHash: 'h0' } },
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([]),
+      getRawText: vi.fn(),
+      createCommit: vi.fn().mockResolvedValue('c_conflict'),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState: vi.fn() });
+    const res = await engine.sync();
+
+    expect(client.getRawText).not.toHaveBeenCalled();
+    expect(res.conflictBranch).toMatch(/^mobile-conflict\//);
+    expect(state.activeConflictBranch).toBe(res.conflictBranch);
+    expect(client.createCommit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        branch: res.conflictBranch,
+        startSha: 'c0',
+        actions: [
+          {
+            action: 'update',
+            file_path: 'deleted-remotely.md',
+            content: 'local edit',
+            encoding: 'text',
+          },
+        ],
+      }),
+    );
+  });
+
+  it('preserves activeConflictBranch when clearConflictBranch fails on getBranchHead', async () => {
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261118-213000',
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockRejectedValue(new Error('Network error')),
+      getTreeRecursive: vi.fn(),
+      getRawText: vi.fn(),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => [],
+      readText: async () => '',
+      writeText: async () => {},
+      deleteFile: async () => {},
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+
+    await expect(engine.clearConflictBranch()).rejects.toThrow('Network error');
+    expect(state.activeConflictBranch).toBe('mobile-conflict/20261118-213000');
+    expect(saveState).not.toHaveBeenCalled();
+  });
 });

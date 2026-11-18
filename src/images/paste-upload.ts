@@ -2,7 +2,7 @@ import { MarkdownView, Notice, TFile, type Editor, type Plugin } from 'obsidian'
 import type { GitLabClient } from '../gitlab/client';
 import type { OnDemandImageLoader } from './loader';
 import type { PluginSettings, SyncState } from '../types';
-import { isImagePath, normalizeVaultPath } from '../utils/paths';
+import { isIgnoredPath, isImagePath, normalizeVaultPath } from '../utils/paths';
 
 export interface PasteUploadDeps {
   settings: PluginSettings;
@@ -277,7 +277,12 @@ async function handleVaultImageCreate(
   getDeps: () => PasteUploadDeps,
 ): Promise<void> {
   const deps = getDeps();
-  if (!deps.isEnabled() || !(file instanceof TFile) || !isImagePath(file.path)) {
+  if (
+    !deps.isEnabled() ||
+    !(file instanceof TFile) ||
+    isIgnoredPath(file.path, deps.settings.syncObsidianDir) ||
+    !isImagePath(file.path)
+  ) {
     return;
   }
 
@@ -327,6 +332,8 @@ export function registerMobileImageUpload(
   plugin: Plugin,
   getDeps: () => PasteUploadDeps,
 ): void {
+  let uploadQueue: Promise<void> = Promise.resolve();
+
   plugin.registerEvent(
     plugin.app.workspace.on('editor-paste', (evt, editor) =>
       handleImageTransfer(evt, evt.clipboardData, editor, getDeps),
@@ -339,7 +346,14 @@ export function registerMobileImageUpload(
     ),
   );
 
-  plugin.registerEvent(
-    plugin.app.vault.on('create', (file) => handleVaultImageCreate(file, plugin, getDeps)),
-  );
+  plugin.app.workspace.onLayoutReady(() => {
+    plugin.registerEvent(
+      plugin.app.vault.on('create', (file) => {
+        uploadQueue = uploadQueue
+          .then(() => handleVaultImageCreate(file, plugin, getDeps))
+          .catch(() => {});
+        return uploadQueue;
+      }),
+    );
+  });
 }

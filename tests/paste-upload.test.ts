@@ -36,9 +36,10 @@ function createMockFile(bytes: number[], mimeType: string, name = 'image.png'): 
   } as unknown as File;
 }
 
-function createWorkspaceHarness(activeEditor?: Editor) {
+function createWorkspaceHarness(activeEditor?: Editor, options?: { deferLayoutReady?: boolean }) {
   const listeners = new Map<string, (...args: any[]) => unknown>();
   const vaultListeners = new Map<string, (...args: any[]) => unknown>();
+  const layoutReadyCallbacks: Array<() => void> = [];
   const registerEvent = vi.fn();
   const readBinary = vi.fn();
   const deleteFile = vi.fn().mockResolvedValue(undefined);
@@ -48,6 +49,13 @@ function createWorkspaceHarness(activeEditor?: Editor) {
         on: vi.fn((name: string, cb: (...args: any[]) => unknown) => {
           listeners.set(name, cb);
           return { name, cb };
+        }),
+        onLayoutReady: vi.fn((cb: () => void) => {
+          if (options?.deferLayoutReady) {
+            layoutReadyCallbacks.push(cb);
+          } else {
+            cb();
+          }
         }),
         getActiveViewOfType: vi.fn(() => (activeEditor ? { editor: activeEditor } : null)),
       },
@@ -63,7 +71,21 @@ function createWorkspaceHarness(activeEditor?: Editor) {
     registerEvent,
   } as unknown as Plugin;
 
-  return { plugin, listeners, vaultListeners, registerEvent, readBinary, deleteFile };
+  const triggerLayoutReady = (): void => {
+    while (layoutReadyCallbacks.length > 0) {
+      layoutReadyCallbacks.shift()!();
+    }
+  };
+
+  return {
+    plugin,
+    listeners,
+    vaultListeners,
+    registerEvent,
+    readBinary,
+    deleteFile,
+    triggerLayoutReady,
+  };
 }
 
 describe('uploadPastedImage', () => {
@@ -483,5 +505,91 @@ describe('registerMobileImageUpload', () => {
     expect(deleteFile).not.toHaveBeenCalled();
     expect(noticeMessages).toHaveLength(1);
     expect(noticeMessages[0]).toMatch(/Upload timeout/);
+  });
+
+  it('defers vault create listener until onLayoutReady and ignores ignored paths', async () => {
+    const { plugin, vaultListeners, readBinary, triggerLayoutReady } = createWorkspaceHarness(
+      undefined,
+      { deferLayoutReady: true },
+    );
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, syncObsidianDir: false },
+      state: {
+        lastSyncedCommitSha: 'c0',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: [],
+      },
+      client: { createCommit: vi.fn() } as any,
+      loader: { registerMemoryImage: vi.fn() } as any,
+      saveState: vi.fn(),
+      isEnabled: () => true,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    expect(vaultListeners.get('create')).toBeUndefined();
+
+    triggerLayoutReady();
+    const createHandler = vaultListeners.get('create')!;
+    expect(createHandler).toBeDefined();
+
+    const ignoredFile = new TFile();
+    ignoredFile.path = '.obsidian/themes/cover.png';
+    ignoredFile.name = 'cover.png';
+    ignoredFile.extension = 'png';
+
+    await createHandler(ignoredFile);
+    expect(readBinary).not.toHaveBeenCalled();
+    expect(deps.client.createCommit).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent vault create events so multi-image picks do not collide', async () => {
+    const { plugin, vaultListeners, readBinary } = createWorkspaceHarness();
+    readBinary.mockResolvedValue(new Uint8Array([1, 2]).buffer);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const createCommit = vi.fn().mockImplementation(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight--;
+      return 'c_seq';
+    });
+
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, attachmentFolder: 'attachments' },
+      state,
+      client: { createCommit } as any,
+      loader: { registerMemoryImage: vi.fn() } as any,
+      saveState: vi.fn().mockResolvedValue(undefined),
+      isEnabled: () => true,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const createHandler = vaultListeners.get('create')!;
+
+    const f1 = new TFile();
+    f1.path = 'pick1.png';
+    f1.name = 'pick1.png';
+    f1.extension = 'png';
+
+    const f2 = new TFile();
+    f2.path = 'pick2.png';
+    f2.name = 'pick2.png';
+    f2.extension = 'png';
+
+    await Promise.all([createHandler(f1), createHandler(f2)]);
+
+    expect(maxInFlight).toBe(1);
+    expect(createCommit).toHaveBeenCalledTimes(2);
+    expect(state.remoteImagePaths).toHaveLength(2);
+    expect(new Set(state.remoteImagePaths).size).toBe(2);
   });
 });
