@@ -144,4 +144,119 @@ describe('SyncEngine', () => {
     expect(state.activeConflictBranch).toBeNull();
     expect(saveState).toHaveBeenCalledTimes(2);
   });
+
+  it('aborts initial sync early when lastSyncedCommitSha is null and local text files exist', async () => {
+    const files: Record<string, string> = { 'existing.md': 'local note' };
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn(),
+      getTreeRecursive: vi.fn(),
+      getRawText: vi.fn(),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+
+    await expect(engine.sync()).rejects.toThrow(/empty vault/i);
+    expect(client.getBranchHead).not.toHaveBeenCalled();
+    expect(client.getTreeRecursive).not.toHaveBeenCalled();
+    expect(saveState).not.toHaveBeenCalled();
+  });
+
+  it('reconciles activeConflictBranch tree to avoid duplicate creates or deletes', async () => {
+    // Scenario:
+    // - created.md: untracked locally, already pushed to activeConflictBranch earlier -> should emit 'update'
+    // - deleted.md: tracked in baseline, deleted locally, already deleted on activeConflictBranch -> should be omitted
+    // - updated.md: tracked in baseline, modified locally, missing on activeConflictBranch -> should emit 'create'
+    const files: Record<string, string> = {
+      'created.md': 'v2',
+      'updated.md': 'edited',
+    };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261118-213000',
+      files: {
+        'deleted.md': { blobSha: 'r_del', contentHash: 'h_del' },
+        'updated.md': { blobSha: 'r_upd', contentHash: 'h_upd' },
+      },
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi
+        .fn()
+        .mockResolvedValueOnce('c1')
+        .mockResolvedValueOnce('c_conflict_head'),
+      getTreeRecursive: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { id: 'r_del', name: 'deleted.md', type: 'blob', path: 'deleted.md', mode: '100644' },
+          { id: 'r_upd', name: 'updated.md', type: 'blob', path: 'updated.md', mode: '100644' },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'rc_1', name: 'created.md', type: 'blob', path: 'created.md', mode: '100644' },
+        ]),
+      getRawText: vi.fn(),
+      createCommit: vi.fn().mockResolvedValue('c_conflict_2'),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState: vi.fn() });
+    const res = await engine.sync();
+
+    expect(res.pushed).toBe(2);
+    expect(client.createCommit).toHaveBeenCalledWith({
+      branch: 'mobile-conflict/20261118-213000',
+      commitMessage: 'Sync mobile conflict changes',
+      actions: [
+        { action: 'update', file_path: 'created.md', content: 'v2', encoding: 'text' },
+        { action: 'create', file_path: 'updated.md', content: 'edited', encoding: 'text' },
+      ],
+    });
+  });
+
+  it('persists pulled state via saveState even if createCommit subsequently throws', async () => {
+    const files: Record<string, string> = { 'local.md': 'new local' };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'r_remote', name: 'remote.md', type: 'blob', path: 'remote.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn().mockResolvedValue('remote body'),
+      createCommit: vi.fn().mockRejectedValue(new Error('GitLab 500')),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+
+    await expect(engine.sync()).rejects.toThrow('GitLab 500');
+    expect(files['remote.md']).toBe('remote body');
+    expect(state.files['remote.md']?.blobSha).toBe('r_remote');
+    expect(saveState).toHaveBeenCalledTimes(1);
+  });
 });

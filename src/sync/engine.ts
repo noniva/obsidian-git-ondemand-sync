@@ -72,6 +72,34 @@ function buildPushActions(
   return actions;
 }
 
+function buildReconciledConflictActions(
+  plan: SyncPlan,
+  localContents: Record<string, string>,
+  conflictPaths: Set<string>,
+): GitLabCommitAction[] {
+  const actions: GitLabCommitAction[] = [];
+
+  for (const path of [...plan.pushCreates, ...plan.pushUpdates]) {
+    actions.push({
+      action: conflictPaths.has(path) ? 'update' : 'create',
+      file_path: path,
+      content: localContents[path],
+      encoding: 'text',
+    });
+  }
+
+  for (const path of plan.pushDeletes) {
+    if (conflictPaths.has(path)) {
+      actions.push({
+        action: 'delete',
+        file_path: path,
+      });
+    }
+  }
+
+  return actions;
+}
+
 /**
  * Orchestrates 3-way text-only vault synchronization against GitLab,
  * indexing remote images in memory and isolating conflicts onto a mobile branch.
@@ -97,6 +125,19 @@ export class SyncEngine {
    * Executes a full pull-then-push sync cycle and persists updated `SyncState`.
    */
   async sync(): Promise<SyncResult> {
+    const rawLocalPaths = await this.vault.listTextFiles();
+    const localPaths = rawLocalPaths.filter(
+      (path) =>
+        !isIgnoredPath(path, this.settings.syncObsidianDir) &&
+        isTextSyncPath(path, this.settings.textAllowlist),
+    );
+
+    if (this.state.lastSyncedCommitSha === null && localPaths.length > 0) {
+      throw new Error(
+        'Initial sync requires an empty vault; existing local text files detected.',
+      );
+    }
+
     const headSha = await this.client.getBranchHead(this.settings.branch);
     const tree = await this.client.getTreeRecursive(headSha);
 
@@ -116,17 +157,10 @@ export class SyncEngine {
 
     this.state.remoteImagePaths = remoteImagePaths.sort();
 
-    const localPaths = await this.vault.listTextFiles();
     const localHashes: LocalFileSnapshot = {};
     const localContents: Record<string, string> = {};
 
     for (const path of localPaths) {
-      if (
-        isIgnoredPath(path, this.settings.syncObsidianDir) ||
-        !isTextSyncPath(path, this.settings.textAllowlist)
-      ) {
-        continue;
-      }
       const content = await this.vault.readText(path);
       localContents[path] = content;
       localHashes[path] = await sha256Hex(content);
@@ -140,7 +174,21 @@ export class SyncEngine {
 
     await this.applyPulls(plan, headSha, remoteTextFiles);
 
-    const actions = buildPushActions(plan, localContents);
+    if (plan.pullDownloads.length > 0 || plan.pullDeletes.length > 0) {
+      await this.saveState();
+    }
+
+    let actions = buildPushActions(plan, localContents);
+    if (plan.targetPushBranch === 'active-conflict' && actions.length > 0) {
+      const conflictBranch = this.state.activeConflictBranch!;
+      const conflictHeadSha = await this.client.getBranchHead(conflictBranch);
+      const conflictTree = await this.client.getTreeRecursive(conflictHeadSha);
+      const conflictPaths = new Set(
+        conflictTree.filter((entry) => entry.type === 'blob').map((entry) => entry.path),
+      );
+      actions = buildReconciledConflictActions(plan, localContents, conflictPaths);
+    }
+
     const resultHeadSha = await this.applyPushes(plan, actions, headSha, localHashes);
 
     await this.saveState();
