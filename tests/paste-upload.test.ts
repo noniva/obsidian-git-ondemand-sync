@@ -18,7 +18,7 @@ vi.mock('obsidian', async (importOriginal) => {
   };
 });
 
-import type { Editor, Plugin } from 'obsidian';
+import { TFile, type Editor, type Plugin } from 'obsidian';
 import {
   uploadPastedImage,
   registerMobileImageUpload,
@@ -36,9 +36,12 @@ function createMockFile(bytes: number[], mimeType: string, name = 'image.png'): 
   } as unknown as File;
 }
 
-function createWorkspaceHarness() {
+function createWorkspaceHarness(activeEditor?: Editor) {
   const listeners = new Map<string, (...args: any[]) => unknown>();
+  const vaultListeners = new Map<string, (...args: any[]) => unknown>();
   const registerEvent = vi.fn();
+  const readBinary = vi.fn();
+  const deleteFile = vi.fn().mockResolvedValue(undefined);
   const plugin = {
     app: {
       workspace: {
@@ -46,12 +49,21 @@ function createWorkspaceHarness() {
           listeners.set(name, cb);
           return { name, cb };
         }),
+        getActiveViewOfType: vi.fn(() => (activeEditor ? { editor: activeEditor } : null)),
+      },
+      vault: {
+        on: vi.fn((name: string, cb: (...args: any[]) => unknown) => {
+          vaultListeners.set(name, cb);
+          return { name, cb };
+        }),
+        readBinary,
+        delete: deleteFile,
       },
     },
     registerEvent,
   } as unknown as Plugin;
 
-  return { plugin, listeners, registerEvent };
+  return { plugin, listeners, vaultListeners, registerEvent, readBinary, deleteFile };
 }
 
 describe('uploadPastedImage', () => {
@@ -178,7 +190,7 @@ describe('registerMobileImageUpload', () => {
 
     registerMobileImageUpload(plugin, () => deps);
 
-    expect(registerEvent).toHaveBeenCalledTimes(2);
+    expect(registerEvent).toHaveBeenCalledTimes(3);
     const pasteHandler = listeners.get('editor-paste');
     expect(pasteHandler).toBeDefined();
 
@@ -386,5 +398,90 @@ describe('registerMobileImageUpload', () => {
     );
     expect(preventText).not.toHaveBeenCalled();
     expect(deps.client.createCommit).not.toHaveBeenCalled();
+  });
+
+  it('uploads mobile camera/picker image created in vault, deletes temp file, and updates active editor', async () => {
+    let editorContent = 'Photo: ![[Pasted image 999.heic]]';
+    const editor = {
+      getValue: vi.fn(() => editorContent),
+      setValue: vi.fn((val: string) => {
+        editorContent = val;
+      }),
+      replaceSelection: vi.fn(),
+    } as unknown as Editor;
+
+    const { plugin, vaultListeners, readBinary, deleteFile } = createWorkspaceHarness(editor);
+    const bytes = new Uint8Array([1, 2, 3, 4]).buffer;
+    readBinary.mockResolvedValue(bytes);
+
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, branch: 'main', attachmentFolder: 'attachments' },
+      state,
+      client: { createCommit: vi.fn().mockResolvedValue('c_cam') } as any,
+      loader: { registerMemoryImage: vi.fn().mockReturnValue('blob:cam-1') } as any,
+      saveState: vi.fn().mockResolvedValue(undefined),
+      isEnabled: () => true,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const createHandler = vaultListeners.get('create')!;
+    expect(createHandler).toBeDefined();
+
+    const tempFile = new TFile();
+    tempFile.path = 'Pasted image 999.heic';
+    tempFile.name = 'Pasted image 999.heic';
+    tempFile.extension = 'heic';
+
+    await createHandler(tempFile);
+
+    expect(readBinary).toHaveBeenCalledWith(tempFile);
+    expect(deps.client.createCommit).toHaveBeenCalledTimes(1);
+    expect(deps.loader.registerMemoryImage).toHaveBeenCalledWith(
+      expect.stringMatching(/^attachments\/Pasted image \d{14}\.heic$/),
+      expect.any(Blob),
+    );
+    expect(deleteFile).toHaveBeenCalledWith(tempFile);
+    expect(editor.setValue).toHaveBeenCalledWith(
+      expect.stringMatching(/^Photo: !\[\[attachments\/Pasted image \d{14}\.heic\]\]$/),
+    );
+  });
+
+  it('shows Notice and preserves temp file if vault create upload fails', async () => {
+    const { plugin, vaultListeners, readBinary, deleteFile } = createWorkspaceHarness();
+    readBinary.mockResolvedValue(new Uint8Array([1, 2]).buffer);
+
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS },
+      state: {
+        lastSyncedCommitSha: 'c0',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: [],
+      },
+      client: { createCommit: vi.fn().mockRejectedValue(new Error('Upload timeout')) } as any,
+      loader: { registerMemoryImage: vi.fn() } as any,
+      saveState: vi.fn(),
+      isEnabled: () => true,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const createHandler = vaultListeners.get('create')!;
+
+    const tempFile = new TFile();
+    tempFile.path = 'camera.jpg';
+    tempFile.name = 'camera.jpg';
+    tempFile.extension = 'jpg';
+
+    await createHandler(tempFile);
+
+    expect(deleteFile).not.toHaveBeenCalled();
+    expect(noticeMessages).toHaveLength(1);
+    expect(noticeMessages[0]).toMatch(/Upload timeout/);
   });
 });

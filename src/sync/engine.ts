@@ -1,5 +1,5 @@
 import type { GitLabClient } from '../gitlab/client';
-import type { GitLabCommitAction, PluginSettings, SyncState } from '../types';
+import type { GitLabCommitAction, GitLabTreeEntry, PluginSettings, SyncState } from '../types';
 import { isIgnoredPath, isImagePath, isTextSyncPath, sha256Hex } from '../utils/paths';
 import { computeSyncPlan, type LocalFileSnapshot, type SyncPlan } from './diff';
 
@@ -72,34 +72,6 @@ function buildPushActions(
   return actions;
 }
 
-function buildReconciledConflictActions(
-  plan: SyncPlan,
-  localContents: Record<string, string>,
-  conflictPaths: Set<string>,
-): GitLabCommitAction[] {
-  const actions: GitLabCommitAction[] = [];
-
-  for (const path of [...plan.pushCreates, ...plan.pushUpdates]) {
-    actions.push({
-      action: conflictPaths.has(path) ? 'update' : 'create',
-      file_path: path,
-      content: localContents[path],
-      encoding: 'text',
-    });
-  }
-
-  for (const path of plan.pushDeletes) {
-    if (conflictPaths.has(path)) {
-      actions.push({
-        action: 'delete',
-        file_path: path,
-      });
-    }
-  }
-
-  return actions;
-}
-
 /**
  * Orchestrates 3-way text-only vault synchronization against GitLab,
  * indexing remote images in memory and isolating conflicts onto a mobile branch.
@@ -125,6 +97,7 @@ export class SyncEngine {
    * Executes a full pull-then-push sync cycle and persists updated `SyncState`.
    */
   async sync(): Promise<SyncResult> {
+    const initialRemoteImages = new Set(this.state.remoteImagePaths);
     const rawLocalPaths = await this.vault.listTextFiles();
     const localPaths = rawLocalPaths.filter(
       (path) =>
@@ -132,7 +105,8 @@ export class SyncEngine {
         isTextSyncPath(path, this.settings.textAllowlist),
     );
 
-    if (this.state.lastSyncedCommitSha === null && localPaths.length > 0) {
+    const isInitialSync = this.state.lastSyncedCommitSha === null;
+    if (isInitialSync && localPaths.length > 0) {
       throw new Error(
         'Initial sync requires an empty vault; existing local text files detected.',
       );
@@ -155,7 +129,22 @@ export class SyncEngine {
       }
     }
 
-    this.state.remoteImagePaths = remoteImagePaths.sort();
+    let conflictTree: GitLabTreeEntry[] | null = null;
+    if (this.state.activeConflictBranch) {
+      const conflictHeadSha = await this.client.getBranchHead(this.state.activeConflictBranch);
+      conflictTree = await this.client.getTreeRecursive(conflictHeadSha);
+      for (const entry of conflictTree) {
+        if (
+          entry.type === 'blob' &&
+          !isIgnoredPath(entry.path, this.settings.syncObsidianDir) &&
+          isImagePath(entry.path)
+        ) {
+          remoteImagePaths.push(entry.path);
+        }
+      }
+    }
+
+    this.mergeRemoteImagePaths(remoteImagePaths, initialRemoteImages);
 
     const localHashes: LocalFileSnapshot = {};
     const localContents: Record<string, string> = {};
@@ -172,25 +161,31 @@ export class SyncEngine {
       localHashes,
     });
 
-    await this.applyPulls(plan, headSha, remoteTextFiles);
+    if (plan.conflicts.length > 0) {
+      await this.resolveConvergedConflicts(plan, headSha, remoteTextFiles, localHashes);
+    }
+
+    await this.applyPulls(plan, headSha, remoteTextFiles, isInitialSync);
 
     if (plan.pullDownloads.length > 0 || plan.pullDeletes.length > 0) {
+      this.mergeRemoteImagePaths(this.state.remoteImagePaths, initialRemoteImages);
       await this.saveState();
     }
 
     let actions = buildPushActions(plan, localContents);
-    if (plan.targetPushBranch === 'active-conflict' && actions.length > 0) {
-      const conflictBranch = this.state.activeConflictBranch!;
-      const conflictHeadSha = await this.client.getBranchHead(conflictBranch);
-      const conflictTree = await this.client.getTreeRecursive(conflictHeadSha);
-      const conflictPaths = new Set(
-        conflictTree.filter((entry) => entry.type === 'blob').map((entry) => entry.path),
+    if (plan.targetPushBranch === 'active-conflict' && conflictTree !== null) {
+      actions = await this.buildReconciledConflictActionsAsync(
+        plan,
+        localContents,
+        localHashes,
+        remoteTextFiles,
+        conflictTree,
       );
-      actions = buildReconciledConflictActions(plan, localContents, conflictPaths);
     }
 
     const resultHeadSha = await this.applyPushes(plan, actions, headSha, localHashes);
 
+    this.mergeRemoteImagePaths(this.state.remoteImagePaths, initialRemoteImages);
     await this.saveState();
 
     return {
@@ -203,25 +198,195 @@ export class SyncEngine {
   }
 
   /**
-   * Clears the active conflict branch marker after the user merges it on desktop.
+   * Clears the active conflict branch marker after the user merges it on desktop,
+   * and adopts converged remote file states from the target branch.
    */
   async clearConflictBranch(): Promise<void> {
     this.state.activeConflictBranch = null;
+
+    const headSha = await this.client.getBranchHead(this.settings.branch);
+    const tree = await this.client.getTreeRecursive(headSha);
+
+    const rawLocalPaths = await this.vault.listTextFiles();
+    const localPaths = rawLocalPaths.filter(
+      (path) =>
+        !isIgnoredPath(path, this.settings.syncObsidianDir) &&
+        isTextSyncPath(path, this.settings.textAllowlist),
+    );
+    const localHashes: LocalFileSnapshot = {};
+    for (const path of localPaths) {
+      const content = await this.vault.readText(path);
+      localHashes[path] = await sha256Hex(content);
+    }
+
+    for (const entry of tree) {
+      if (
+        entry.type !== 'blob' ||
+        isIgnoredPath(entry.path, this.settings.syncObsidianDir) ||
+        !isTextSyncPath(entry.path, this.settings.textAllowlist)
+      ) {
+        continue;
+      }
+      const localHash = localHashes[entry.path];
+      if (localHash === undefined) {
+        continue;
+      }
+      const existing = this.state.files[entry.path];
+      if (existing && existing.blobSha === entry.id && existing.contentHash === localHash) {
+        continue;
+      }
+      const remoteText = await this.client.getRawText(entry.path, headSha);
+      if (typeof remoteText === 'string' && (await sha256Hex(remoteText)) === localHash) {
+        this.state.files[entry.path] = {
+          blobSha: entry.id,
+          contentHash: localHash,
+        };
+      }
+    }
+
+    this.state.lastSyncedCommitSha = headSha;
     await this.saveState();
+  }
+
+  private mergeRemoteImagePaths(collected: string[], initialRemoteImages: Set<string>): void {
+    const addedDuringSync = this.state.remoteImagePaths.filter((p) => !initialRemoteImages.has(p));
+    this.state.remoteImagePaths = Array.from(new Set([...collected, ...addedDuringSync])).sort();
+  }
+
+  private async resolveConvergedConflicts(
+    plan: SyncPlan,
+    headSha: string,
+    remoteTextFiles: Record<string, string>,
+    localHashes: LocalFileSnapshot,
+  ): Promise<void> {
+    const convergedPaths = new Set<string>();
+    for (const path of plan.conflicts) {
+      const localHash = localHashes[path];
+      if (localHash === undefined) {
+        continue;
+      }
+      const remoteText = await this.client.getRawText(path, headSha);
+      if (typeof remoteText === 'string' && (await sha256Hex(remoteText)) === localHash) {
+        convergedPaths.add(path);
+        this.state.files[path] = {
+          blobSha: remoteTextFiles[path],
+          contentHash: localHash,
+        };
+      }
+    }
+
+    if (convergedPaths.size === 0) {
+      return;
+    }
+
+    plan.conflicts = plan.conflicts.filter((p) => !convergedPaths.has(p));
+    plan.pushCreates = plan.pushCreates.filter((p) => !convergedPaths.has(p));
+    plan.pushUpdates = plan.pushUpdates.filter((p) => !convergedPaths.has(p));
+    plan.pushDeletes = plan.pushDeletes.filter((p) => !convergedPaths.has(p));
+    plan.hasConflict = plan.conflicts.length > 0;
+    if (!this.state.activeConflictBranch) {
+      plan.targetPushBranch = plan.hasConflict ? 'conflict' : 'target';
+    }
+  }
+
+  private async buildReconciledConflictActionsAsync(
+    plan: SyncPlan,
+    localContents: Record<string, string>,
+    localHashes: LocalFileSnapshot,
+    remoteTextFiles: Record<string, string>,
+    conflictTree: GitLabTreeEntry[],
+  ): Promise<GitLabCommitAction[]> {
+    const conflictBranch = this.state.activeConflictBranch!;
+    const conflictPaths = new Set(
+      conflictTree.filter((entry) => entry.type === 'blob').map((entry) => entry.path),
+    );
+
+    const actions: GitLabCommitAction[] = [];
+
+    for (const path of [...plan.pushCreates, ...plan.pushUpdates]) {
+      if (conflictPaths.has(path)) {
+        const conflictText = await this.client.getRawText(path, conflictBranch);
+        if (typeof conflictText === 'string' && (await sha256Hex(conflictText)) === localHashes[path]) {
+          continue;
+        }
+        actions.push({
+          action: 'update',
+          file_path: path,
+          content: localContents[path],
+          encoding: 'text',
+        });
+      } else {
+        actions.push({
+          action: 'create',
+          file_path: path,
+          content: localContents[path],
+          encoding: 'text',
+        });
+      }
+    }
+
+    const deletedPaths = new Set<string>();
+    for (const path of plan.pushDeletes) {
+      if (conflictPaths.has(path)) {
+        deletedPaths.add(path);
+        actions.push({
+          action: 'delete',
+          file_path: path,
+        });
+      }
+    }
+
+    for (const entry of conflictTree) {
+      if (
+        entry.type !== 'blob' ||
+        isIgnoredPath(entry.path, this.settings.syncObsidianDir) ||
+        !isTextSyncPath(entry.path, this.settings.textAllowlist)
+      ) {
+        continue;
+      }
+      if (
+        remoteTextFiles[entry.path] === undefined &&
+        localHashes[entry.path] === undefined &&
+        !deletedPaths.has(entry.path)
+      ) {
+        deletedPaths.add(entry.path);
+        actions.push({
+          action: 'delete',
+          file_path: entry.path,
+        });
+      }
+    }
+
+    return actions;
   }
 
   private async applyPulls(
     plan: SyncPlan,
     headSha: string,
     remoteTextFiles: Record<string, string>,
+    isInitialSync: boolean,
   ): Promise<void> {
-    for (const path of plan.pullDownloads) {
-      const content = await this.client.getRawText(path, headSha);
-      await this.vault.writeText(path, content);
-      this.state.files[path] = {
-        blobSha: remoteTextFiles[path],
-        contentHash: await sha256Hex(content),
-      };
+    if (isInitialSync) {
+      const downloaded = new Map<string, string>();
+      for (const path of plan.pullDownloads) {
+        downloaded.set(path, await this.client.getRawText(path, headSha));
+      }
+      for (const [path, content] of downloaded) {
+        await this.vault.writeText(path, content);
+        this.state.files[path] = {
+          blobSha: remoteTextFiles[path],
+          contentHash: await sha256Hex(content),
+        };
+      }
+    } else {
+      for (const path of plan.pullDownloads) {
+        const content = await this.client.getRawText(path, headSha);
+        await this.vault.writeText(path, content);
+        this.state.files[path] = {
+          blobSha: remoteTextFiles[path],
+          contentHash: await sha256Hex(content),
+        };
+      }
     }
 
     for (const path of plan.pullDeletes) {

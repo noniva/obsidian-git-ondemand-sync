@@ -1,19 +1,30 @@
 /* GitLab On-Demand Sync styles */
-.gitlab-ondemand-image-wrapper {
+.gitlab-ondemand-embed {
   display: inline-block;
   max-width: 100%;
 }
 
-.gitlab-ondemand-image {
+.gitlab-ondemand-img {
   max-width: 100%;
   height: auto;
 }
 
-.gitlab-ondemand-image-loading {
+.gitlab-img-loading {
   opacity: 0.6;
 }
 
-.gitlab-ondemand-image-error {
+.gitlab-img-loaded {
+  opacity: 1;
+}
+
+.gitlab-img-error {
+  display: inline-block;
+  min-width: 120px;
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px dashed var(--text-error);
+  border-radius: 4px;
   color: var(--text-error);
   font-size: var(--font-ui-small);
+  background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
 }

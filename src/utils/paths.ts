@@ -7,6 +7,8 @@ const IMAGE_EXTENSIONS = new Set([
   '.svg',
   '.bmp',
   '.avif',
+  '.heic',
+  '.heif',
   '.ico',
   '.tiff',
   '.tif',
@@ -14,6 +16,14 @@ const IMAGE_EXTENSIONS = new Set([
 
 const URI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const EMBED_SIZE_RE = /^(\d+)(?:x\d+)?$/;
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 function getLowerExtension(filePath: string): string {
   const normalized = normalizeVaultPath(filePath);
@@ -74,20 +84,45 @@ export function isTextSyncPath(path: string, allowlist: string[]): boolean {
 }
 
 /**
- * Returns true for paths that should never be synced (`.git` always, `.obsidian` unless enabled).
+ * Returns true for paths that should never be synced: any path containing a dot-prefixed
+ * segment (e.g. `.git`, `.github`, `.vscode`), except `.obsidian` when `syncObsidianDir` is true.
  */
 export function isIgnoredPath(path: string, syncObsidianDir: boolean): boolean {
   const normalized = normalizeVaultPath(path);
   if (!normalized) {
     return false;
   }
-  if (normalized === '.git' || normalized.startsWith('.git/')) {
-    return true;
-  }
-  if (!syncObsidianDir && (normalized === '.obsidian' || normalized.startsWith('.obsidian/'))) {
+  const segments = normalized.split('/');
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (!segment.startsWith('.')) {
+      continue;
+    }
+    if (i === 0 && segment === '.obsidian' && syncObsidianDir) {
+      continue;
+    }
     return true;
   }
   return false;
+}
+
+/**
+ * Extracts a trailing numeric width from an embed alias/size string (e.g. `300`,
+ * `300x200`, or `alt text|300`).
+ */
+export function parseEmbedWidth(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const lastPipe = trimmed.lastIndexOf('|');
+  const candidate = (lastPipe >= 0 ? trimmed.slice(lastPipe + 1) : trimmed).trim();
+  const sizeMatch = EMBED_SIZE_RE.exec(candidate);
+  if (!sizeMatch) {
+    return undefined;
+  }
+  const width = Number(sizeMatch[1]);
+  return Number.isFinite(width) && width > 0 ? width : undefined;
 }
 
 /**
@@ -110,7 +145,8 @@ export function parseImageEmbed(rawTarget: string): { target: string; width?: nu
     return null;
   }
 
-  const cleanedTarget = pathWithoutFragment
+  const decodedPath = safeDecodeURIComponent(pathWithoutFragment);
+  const cleanedTarget = decodedPath
     .replace(/\\/g, '/')
     .replace(/^\/+/, '')
     .replace(/^(?:\.\/)+/, '');
@@ -118,13 +154,7 @@ export function parseImageEmbed(rawTarget: string): { target: string; width?: nu
     return null;
   }
 
-  let width: number | undefined;
-  if (alias) {
-    const sizeMatch = EMBED_SIZE_RE.exec(alias);
-    if (sizeMatch) {
-      width = Number(sizeMatch[1]);
-    }
-  }
+  const width = alias ? parseEmbedWidth(alias) : undefined;
 
   return { target: cleanedTarget, width };
 }
@@ -153,7 +183,8 @@ export function resolveRemoteImagePath(
   noteDir: string,
   remoteImagePaths: string[],
 ): string | null {
-  const cleanedTarget = target.trim().replace(/\\/g, '/').replace(/^\/+/, '');
+  const decodedTarget = safeDecodeURIComponent(target.trim());
+  const cleanedTarget = decodedTarget.replace(/\\/g, '/').replace(/^\/+/, '');
   if (!cleanedTarget || URI_SCHEME_RE.test(cleanedTarget)) {
     return null;
   }

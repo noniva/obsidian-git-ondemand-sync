@@ -296,4 +296,38 @@ describe('OnDemandImageLoader', () => {
     expect(errImg.src).toBe('');
     expect(errImg.classList.add).toHaveBeenCalledWith('gitlab-img-error');
   });
+
+  it('retries with fallbackRef when primary ref fails and enters error only if both fail', async () => {
+    const client = {
+      getRawBinary: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('404 on conflict branch'))
+        .mockResolvedValueOnce(new Uint8Array([9, 8, 7]).buffer)
+        .mockRejectedValueOnce(new Error('404 on conflict branch'))
+        .mockRejectedValueOnce(new Error('404 on main')),
+    } as any;
+    const blobApi = {
+      createObjectURL: vi.fn().mockReturnValue('blob:fallback-ok'),
+      revokeObjectURL: vi.fn(),
+    };
+
+    const loader = new OnDemandImageLoader(client, blobApi, 2);
+    const okImg = createMockImg();
+    const failImg = createMockImg();
+
+    loader.loadIntoElement(okImg, 'attachments/existing.png', 'mobile-conflict/1', 'main');
+    await vi.waitFor(() => expect(okImg.src).toBe('blob:fallback-ok'));
+    expect(client.getRawBinary).toHaveBeenNthCalledWith(
+      1,
+      'attachments/existing.png',
+      'mobile-conflict/1',
+    );
+    expect(client.getRawBinary).toHaveBeenNthCalledWith(2, 'attachments/existing.png', 'main');
+
+    loader.loadIntoElement(failImg, 'attachments/missing.png', 'mobile-conflict/1', 'main');
+    await vi.waitFor(() =>
+      expect(failImg.classList.add).toHaveBeenCalledWith('gitlab-img-error'),
+    );
+    expect(failImg.src).toBe('');
+  });
 });

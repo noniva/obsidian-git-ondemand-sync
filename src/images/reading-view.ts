@@ -1,7 +1,13 @@
 import { MarkdownRenderChild, type Plugin } from 'obsidian';
 import type { OnDemandImageLoader } from './loader';
 import type { PluginSettings, SyncState } from '../types';
-import { isImagePath, normalizeVaultPath, parseImageEmbed, resolveRemoteImagePath } from '../utils/paths';
+import {
+  isImagePath,
+  normalizeVaultPath,
+  parseEmbedWidth,
+  parseImageEmbed,
+  resolveRemoteImagePath,
+} from '../utils/paths';
 
 export interface ImageRenderContext {
   settings: PluginSettings;
@@ -10,8 +16,6 @@ export interface ImageRenderContext {
   isLocalFilePresent: (path: string) => boolean;
   isEnabled: () => boolean;
 }
-
-const SIZE_ATTR_RE = /^(\d+)(?:x\d+)?$/;
 
 class GitLabImageRenderChild extends MarkdownRenderChild {
   private readonly cleanup: () => void;
@@ -32,22 +36,32 @@ function getNoteDir(sourcePath: string): string {
   return lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
 }
 
-function getActiveRef(ctx: ImageRenderContext): string {
-  return ctx.state.activeConflictBranch ?? (ctx.settings.branch || 'main');
+function getActiveRefs(ctx: ImageRenderContext): { ref: string; fallbackRef?: string } {
+  const targetBranch = ctx.settings.branch || 'main';
+  if (ctx.state.activeConflictBranch) {
+    return { ref: ctx.state.activeConflictBranch, fallbackRef: targetBranch };
+  }
+  return { ref: targetBranch };
 }
 
 function parseWidthAttr(raw: string | null): number | undefined {
   if (!raw) {
     return undefined;
   }
-  const match = SIZE_ATTR_RE.exec(raw.trim());
-  return match ? Number(match[1]) : undefined;
+  return parseEmbedWidth(raw);
 }
 
 function applyImageAttributes(imgEl: HTMLImageElement, alt: string, width?: number): void {
   imgEl.classList.add('gitlab-ondemand-img');
-  if (alt && !SIZE_ATTR_RE.test(alt.trim())) {
-    imgEl.alt = alt;
+  const trimmedAlt = alt.trim();
+  if (trimmedAlt && parseEmbedWidth(trimmedAlt) === undefined) {
+    imgEl.alt = trimmedAlt;
+  } else if (trimmedAlt && trimmedAlt.includes('|')) {
+    const lastPipe = trimmedAlt.lastIndexOf('|');
+    const cleanedAlt = trimmedAlt.slice(0, lastPipe).trim();
+    if (cleanedAlt) {
+      imgEl.alt = cleanedAlt;
+    }
   }
   if (width !== undefined && Number.isFinite(width) && width > 0) {
     imgEl.style.width = `${width}px`;
@@ -70,7 +84,7 @@ export function registerReadingViewImageProcessor(
     }
 
     const noteDir = getNoteDir(mdCtx.sourcePath);
-    const ref = getActiveRef(ctx);
+    const { ref, fallbackRef } = getActiveRefs(ctx);
 
     const embeds = el.querySelectorAll<HTMLElement>('.internal-embed');
     for (const embedEl of Array.from(embeds)) {
@@ -103,7 +117,7 @@ export function registerReadingViewImageProcessor(
       embedEl.classList.add('is-loaded', 'gitlab-ondemand-embed');
       embedEl.replaceChildren(imgEl);
 
-      const cleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref);
+      const cleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
       mdCtx.addChild(new GitLabImageRenderChild(embedEl, cleanup));
     }
 
@@ -136,8 +150,9 @@ export function registerReadingViewImageProcessor(
 
       applyImageAttributes(imgEl, altAttr, width);
       imgEl.dataset.gitlabProcessed = 'true';
+      imgEl.removeAttribute('src');
 
-      const cleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref);
+      const cleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
       mdCtx.addChild(new GitLabImageRenderChild(imgEl, cleanup));
     }
   });

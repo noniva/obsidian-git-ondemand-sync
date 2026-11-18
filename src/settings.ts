@@ -146,9 +146,13 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
           .setButtonText('Clear Conflict State')
           .setDisabled(!conflictBranch)
           .onClick(async () => {
-            this.plugin.syncState.activeConflictBranch = null;
-            await this.plugin.savePluginData();
-            new Notice('GitLab conflict state cleared.');
+            try {
+              await this.plugin.clearConflictState();
+              new Notice('GitLab conflict state cleared.');
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              new Notice(`Failed to clear conflict state: ${message}`, 8000);
+            }
             this.display();
           }),
       );

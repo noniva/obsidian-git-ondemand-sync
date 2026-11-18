@@ -239,6 +239,24 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     };
   }
 
+  private createSyncEngine(): SyncEngine {
+    return new SyncEngine({
+      settings: this.settings,
+      state: this.syncState,
+      client: this.client,
+      vault: this.createVaultAdapter(),
+      saveState: () => this.savePluginData(),
+    });
+  }
+
+  /**
+   * Clears the active conflict branch marker and reconciles converged files against the target branch.
+   */
+  async clearConflictState(): Promise<void> {
+    const engine = this.createSyncEngine();
+    await engine.clearConflictBranch();
+  }
+
   async syncWithNotice(): Promise<void> {
     if (!this.isEnabled()) {
       new Notice(
@@ -259,13 +277,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
     this.isSyncing = true;
     try {
-      const engine = new SyncEngine({
-        settings: this.settings,
-        state: this.syncState,
-        client: this.client,
-        vault: this.createVaultAdapter(),
-        saveState: () => this.savePluginData(),
-      });
+      const engine = this.createSyncEngine();
 
       const res = await engine.sync();
       if (res.conflictBranch) {

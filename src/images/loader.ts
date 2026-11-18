@@ -68,10 +68,15 @@ export class OnDemandImageLoader {
   }
 
   /**
-   * Queues an immediate fetch for `repoPath` at `ref`, binds the resulting `blob:` URL
-   * to `imgEl.src`, and returns a cleanup callback that aborts/revokes on teardown.
+   * Queues an immediate fetch for `repoPath` at `ref` (with optional `fallbackRef` if `ref` fails),
+   * binds the resulting `blob:` URL to `imgEl.src`, and returns a cleanup callback.
    */
-  loadIntoElement(imgEl: HTMLImageElement, repoPath: string, ref: string): () => void {
+  loadIntoElement(
+    imgEl: HTMLImageElement,
+    repoPath: string,
+    ref: string,
+    fallbackRef?: string,
+  ): () => void {
     const cacheKey = normalizeVaultPath(repoPath);
     const cachedUrl = this.memoryImages.get(cacheKey);
     if (cachedUrl) {
@@ -89,7 +94,19 @@ export class OnDemandImageLoader {
       blobUrl: null,
       run: async () => {
         try {
-          const buffer = await this.client.getRawBinary(repoPath, ref);
+          let buffer: ArrayBuffer;
+          try {
+            buffer = await this.client.getRawBinary(repoPath, ref);
+          } catch (primaryErr) {
+            if (task.cancelled) {
+              return;
+            }
+            if (fallbackRef && fallbackRef !== ref) {
+              buffer = await this.client.getRawBinary(repoPath, fallbackRef);
+            } else {
+              throw primaryErr;
+            }
+          }
           if (task.cancelled) {
             return;
           }
@@ -145,10 +162,15 @@ export class OnDemandImageLoader {
    * Lazily loads `repoPath` when `imgEl` enters the viewport via `IntersectionObserver`,
    * falling back to immediate loading when `IntersectionObserver` is unavailable.
    */
-  observeAndLoad(imgEl: HTMLImageElement, repoPath: string, ref: string): () => void {
+  observeAndLoad(
+    imgEl: HTMLImageElement,
+    repoPath: string,
+    ref: string,
+    fallbackRef?: string,
+  ): () => void {
     const ObserverCtor = globalThis.IntersectionObserver;
     if (typeof ObserverCtor !== 'function') {
-      return this.loadIntoElement(imgEl, repoPath, ref);
+      return this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
     }
 
     let disposed = false;
@@ -164,7 +186,7 @@ export class OnDemandImageLoader {
         if (matchesTarget && visible) {
           observer.disconnect();
           if (!loadCleanup) {
-            loadCleanup = this.loadIntoElement(imgEl, repoPath, ref);
+            loadCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
           }
           break;
         }

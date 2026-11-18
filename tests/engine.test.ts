@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SyncEngine } from '../src/sync/engine';
 import { DEFAULT_SETTINGS, type SyncState } from '../src/types';
+import { sha256Hex } from '../src/utils/paths';
 
 describe('SyncEngine', () => {
   it('syncs text files only, indexes remote images, and skips binary PDFs', async () => {
@@ -258,5 +259,174 @@ describe('SyncEngine', () => {
     expect(files['remote.md']).toBe('remote body');
     expect(state.files['remote.md']?.blobSha).toBe('r_remote');
     expect(saveState).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves converged conflicts without creating a conflict branch and updates baseline in clearConflictBranch', async () => {
+    const mergedText = 'merged content';
+    const mergedHash = await sha256Hex(mergedText);
+    const files: Record<string, string> = { 'a.md': mergedText };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: { 'a.md': { blobSha: 'r0', contentHash: 'h0' } },
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'r1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn().mockResolvedValue(mergedText),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+    const res = await engine.sync();
+
+    expect(res.conflictBranch).toBeNull();
+    expect(res.pushed).toBe(0);
+    expect(client.createCommit).not.toHaveBeenCalled();
+    expect(state.files['a.md']).toEqual({ blobSha: 'r1', contentHash: mergedHash });
+    expect(state.lastSyncedCommitSha).toBe('c1');
+
+    // Now test clearConflictBranch adopting converged state from target branch
+    state.activeConflictBranch = 'mobile-conflict/20261118-213000';
+    state.files['a.md'] = { blobSha: 'r0', contentHash: 'h0' };
+    state.lastSyncedCommitSha = 'c0';
+    client.getBranchHead.mockResolvedValue('c2');
+    client.getTreeRecursive.mockResolvedValue([
+      { id: 'r2', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+    ]);
+
+    await engine.clearConflictBranch();
+    expect(state.activeConflictBranch).toBeNull();
+    expect(state.lastSyncedCommitSha).toBe('c2');
+    expect(state.files['a.md']).toEqual({ blobSha: 'r2', contentHash: mergedHash });
+  });
+
+  it('keeps vault empty and state untouched when initial sync fails mid-download', async () => {
+    const files: Record<string, string> = {};
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('head1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'b1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+        { id: 'b2', name: 'b.md', type: 'blob', path: 'b.md', mode: '100644' },
+      ]),
+      getRawText: vi
+        .fn()
+        .mockResolvedValueOnce('# A')
+        .mockRejectedValueOnce(new Error('Network drop')),
+      createCommit: vi.fn(),
+    } as any;
+    const writeText = vi.fn(async (p: string, c: string) => { files[p] = c; });
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText,
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+
+    await expect(engine.sync()).rejects.toThrow('Network drop');
+    expect(writeText).not.toHaveBeenCalled();
+    expect(Object.keys(files)).toHaveLength(0);
+    expect(state.files).toEqual({});
+    expect(state.lastSyncedCommitSha).toBeNull();
+    expect(saveState).not.toHaveBeenCalled();
+  });
+
+  it('merges conflict-branch images, skips identical updates, and deletes conflict-branch-only orphans', async () => {
+    const files: Record<string, string> = {
+      'same.md': 'already on conflict branch',
+    };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261118-213000',
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi
+        .fn()
+        .mockResolvedValueOnce('c1')
+        .mockResolvedValueOnce('c_conflict_head'),
+      getTreeRecursive: vi
+        .fn()
+        .mockResolvedValueOnce([
+          { id: 'img_main', name: 'main.png', type: 'blob', path: 'attachments/main.png', mode: '100644' },
+        ])
+        .mockResolvedValueOnce([
+          { id: 'img_conf', name: 'conf.png', type: 'blob', path: 'attachments/conf.png', mode: '100644' },
+          { id: 'rc_same', name: 'same.md', type: 'blob', path: 'same.md', mode: '100644' },
+          { id: 'rc_orphan', name: 'orphan.md', type: 'blob', path: 'orphan.md', mode: '100644' },
+        ]),
+      getRawText: vi.fn().mockResolvedValue('already on conflict branch'),
+      createCommit: vi.fn().mockResolvedValue('c_conflict_3'),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState: vi.fn() });
+    const res = await engine.sync();
+
+    expect(state.remoteImagePaths).toEqual(['attachments/conf.png', 'attachments/main.png']);
+    expect(res.pushed).toBe(1);
+    expect(client.createCommit).toHaveBeenCalledWith({
+      branch: 'mobile-conflict/20261118-213000',
+      commitMessage: 'Sync mobile conflict changes',
+      actions: [{ action: 'delete', file_path: 'orphan.md' }],
+    });
+  });
+
+  it('preserves images pasted concurrently during an active sync', async () => {
+    const files: Record<string, string> = {};
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('head1'),
+      getTreeRecursive: vi.fn().mockImplementation(async () => {
+        // Simulate concurrent paste-upload adding a new image while sync is awaiting tree
+        state.remoteImagePaths.push('attachments/pasted-during-sync.png');
+        return [
+          { id: 'b1', name: 'note.md', type: 'blob', path: 'note.md', mode: '100644' },
+          { id: 'b2', name: 'old.png', type: 'blob', path: 'attachments/old.png', mode: '100644' },
+        ];
+      }),
+      getRawText: vi.fn().mockResolvedValue('# Note'),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState: vi.fn() });
+    await engine.sync();
+
+    expect(state.remoteImagePaths).toEqual([
+      'attachments/old.png',
+      'attachments/pasted-during-sync.png',
+    ]);
   });
 });

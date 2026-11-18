@@ -1,8 +1,8 @@
-import { Notice, type Editor, type Plugin } from 'obsidian';
+import { MarkdownView, Notice, TFile, type Editor, type Plugin } from 'obsidian';
 import type { GitLabClient } from '../gitlab/client';
 import type { OnDemandImageLoader } from './loader';
 import type { PluginSettings, SyncState } from '../types';
-import { normalizeVaultPath } from '../utils/paths';
+import { isImagePath, normalizeVaultPath } from '../utils/paths';
 
 export interface PasteUploadDeps {
   settings: PluginSettings;
@@ -239,9 +239,89 @@ export async function uploadPastedImage(
   };
 }
 
+const EXTENSION_TO_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  avif: 'image/avif',
+  heic: 'image/heic',
+  heif: 'image/heif',
+  ico: 'image/x-icon',
+  tif: 'image/tiff',
+  tiff: 'image/tiff',
+};
+
+function mimeTypeFromExtension(extOrPath: string): string {
+  const clean = extOrPath.trim().toLowerCase().replace(/^\./, '');
+  const dotIdx = clean.lastIndexOf('.');
+  const ext = dotIdx >= 0 ? clean.slice(dotIdx + 1) : clean;
+  return EXTENSION_TO_MIME[ext] ?? 'image/png';
+}
+
+function getActiveMarkdownEditor(plugin: Plugin): Editor | null {
+  const activeView = plugin.app.workspace.getActiveViewOfType?.(MarkdownView);
+  if (activeView?.editor) {
+    return activeView.editor;
+  }
+  const activeEditor = (plugin.app.workspace as { activeEditor?: { editor?: Editor } }).activeEditor;
+  return activeEditor?.editor ?? null;
+}
+
+async function handleVaultImageCreate(
+  file: unknown,
+  plugin: Plugin,
+  getDeps: () => PasteUploadDeps,
+): Promise<void> {
+  const deps = getDeps();
+  if (!deps.isEnabled() || !(file instanceof TFile) || !isImagePath(file.path)) {
+    return;
+  }
+
+  const branch = deps.state.activeConflictBranch ?? (deps.settings.branch || 'main');
+  try {
+    const bytes = await plugin.app.vault.readBinary(file);
+    const mimeType = mimeTypeFromExtension(file.extension || file.path);
+    const result = await uploadPastedImage({
+      bytes,
+      mimeType,
+      attachmentFolder: deps.settings.attachmentFolder,
+      branch,
+      client: deps.client,
+      state: deps.state,
+      saveState: deps.saveState,
+    });
+
+    deps.loader.registerMemoryImage(result.repoPath, new Blob([bytes], { type: mimeType }));
+    await plugin.app.vault.delete(file);
+
+    const editor = getActiveMarkdownEditor(plugin);
+    if (editor) {
+      const content = editor.getValue();
+      if (!content.includes(result.repoPath)) {
+        const pathLink = `![[${file.path}]]`;
+        const nameLink = `![[${file.name}]]`;
+        if (content.includes(pathLink)) {
+          editor.setValue(content.replace(pathLink, result.wikilink));
+        } else if (content.includes(nameLink)) {
+          editor.setValue(content.replace(nameLink, result.wikilink));
+        } else {
+          editor.replaceSelection(result.wikilink);
+        }
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    new Notice(`Failed to upload image to GitLab: ${message}`);
+  }
+}
+
 /**
- * Registers `editor-paste` and `editor-drop` handlers that upload image files directly
- * to GitLab and cache their blobs in memory without writing to local mobile storage.
+ * Registers `editor-paste`, `editor-drop`, and `vault.on('create')` handlers that upload image
+ * files directly to GitLab and cache their blobs in memory without keeping local mobile files.
  */
 export function registerMobileImageUpload(
   plugin: Plugin,
@@ -257,5 +337,9 @@ export function registerMobileImageUpload(
     plugin.app.workspace.on('editor-drop', (evt, editor) =>
       handleImageTransfer(evt, evt.dataTransfer, editor, getDeps),
     ),
+  );
+
+  plugin.registerEvent(
+    plugin.app.vault.on('create', (file) => handleVaultImageCreate(file, plugin, getDeps)),
   );
 }

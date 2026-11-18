@@ -23,8 +23,12 @@ function getNoteDir(sourcePath: string): string {
   return lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
 }
 
-function getActiveRef(ctx: ImageRenderContext): string {
-  return ctx.state.activeConflictBranch ?? (ctx.settings.branch || 'main');
+function getActiveRefs(ctx: ImageRenderContext): { ref: string; fallbackRef?: string } {
+  const targetBranch = ctx.settings.branch || 'main';
+  if (ctx.state.activeConflictBranch) {
+    return { ref: ctx.state.activeConflictBranch, fallbackRef: targetBranch };
+  }
+  return { ref: targetBranch };
 }
 
 function parseMarkdownAlt(rawAlt: string): { alt: string; width?: number } {
@@ -57,6 +61,7 @@ function selectionOverlapsRange(view: EditorView, from: number, to: number): boo
 class RemoteImageWidget extends WidgetType {
   private readonly repoPath: string;
   private readonly ref: string;
+  private readonly fallbackRef: string | undefined;
   private readonly alt: string;
   private readonly width: number | undefined;
   private readonly getContext: () => ImageRenderContext;
@@ -64,6 +69,7 @@ class RemoteImageWidget extends WidgetType {
   constructor(
     repoPath: string,
     ref: string,
+    fallbackRef: string | undefined,
     alt: string,
     width: number | undefined,
     getContext: () => ImageRenderContext,
@@ -71,6 +77,7 @@ class RemoteImageWidget extends WidgetType {
     super();
     this.repoPath = repoPath;
     this.ref = ref;
+    this.fallbackRef = fallbackRef;
     this.alt = alt;
     this.width = width;
     this.getContext = getContext;
@@ -80,6 +87,7 @@ class RemoteImageWidget extends WidgetType {
     return (
       other.repoPath === this.repoPath &&
       other.ref === this.ref &&
+      other.fallbackRef === this.fallbackRef &&
       other.alt === this.alt &&
       other.width === this.width
     );
@@ -101,7 +109,12 @@ class RemoteImageWidget extends WidgetType {
 
     container.appendChild(imgEl);
 
-    const cleanup = this.getContext().loader.observeAndLoad(imgEl, this.repoPath, this.ref);
+    const cleanup = this.getContext().loader.observeAndLoad(
+      imgEl,
+      this.repoPath,
+      this.ref,
+      this.fallbackRef,
+    );
     widgetCleanups.set(container, cleanup);
     return container;
   }
@@ -132,7 +145,7 @@ function buildDecorations(view: EditorView, getContext: () => ImageRenderContext
 
   const fileInfo = view.state.field(editorInfoField, false);
   const noteDir = getNoteDir(fileInfo?.file?.path ?? '');
-  const ref = getActiveRef(ctx);
+  const { ref, fallbackRef } = getActiveRefs(ctx);
 
   const builder = new RangeSetBuilder<Decoration>();
   let lastScannedLineFrom = -1;
@@ -179,7 +192,7 @@ function buildDecorations(view: EditorView, getContext: () => ImageRenderContext
           }
         }
 
-        const widget = new RemoteImageWidget(resolved, ref, alt, width, getContext);
+        const widget = new RemoteImageWidget(resolved, ref, fallbackRef, alt, width, getContext);
         builder.add(matchStart, matchEnd, Decoration.replace({ widget }));
       }
 

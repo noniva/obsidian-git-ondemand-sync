@@ -99,6 +99,10 @@ export class TFile extends TAbstractFile {
 
 export class TFolder extends TAbstractFile {}
 
+export class MarkdownView {
+  editor: unknown = null;
+}
+
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
 }
