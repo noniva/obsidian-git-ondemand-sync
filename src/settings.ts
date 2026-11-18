@@ -1,0 +1,156 @@
+import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
+import type GitLabOnDemandSyncPlugin from './main';
+import { DEFAULT_SETTINGS } from './types';
+
+/**
+ * Settings tab for configuring GitLab connection, text-only sync rules,
+ * mobile image upload behavior, and conflict state recovery.
+ */
+export class GitLabSyncSettingTab extends PluginSettingTab {
+  private readonly plugin: GitLabOnDemandSyncPlugin;
+
+  constructor(app: App, plugin: GitLabOnDemandSyncPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    new Setting(containerEl)
+      .setName('GitLab Base URL')
+      .setDesc('Base URL of your GitLab instance (e.g. https://gitlab.com).')
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.gitlabUrl)
+          .setValue(this.plugin.settings.gitlabUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.gitlabUrl = value.trim() || DEFAULT_SETTINGS.gitlabUrl;
+            await this.plugin.saveAndRefreshSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Project ID / Path')
+      .setDesc('Numeric project ID or URL-path (e.g. username/my-vault).')
+      .addText((text) =>
+        text
+          .setPlaceholder('username/my-vault')
+          .setValue(this.plugin.settings.projectId)
+          .onChange(async (value) => {
+            this.plugin.settings.projectId = value.trim();
+            await this.plugin.saveAndRefreshSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Branch')
+      .setDesc('Target Git branch to sync with.')
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.branch)
+          .setValue(this.plugin.settings.branch)
+          .onChange(async (value) => {
+            this.plugin.settings.branch = value.trim() || DEFAULT_SETTINGS.branch;
+            await this.plugin.saveAndRefreshSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Personal Access Token')
+      .setDesc('GitLab token with api or read_repository + write_repository scope.')
+      .addText((text) => {
+        text.inputEl.type = 'password';
+        text
+          .setPlaceholder('glpat-...')
+          .setValue(this.plugin.settings.token)
+          .onChange(async (value) => {
+            this.plugin.settings.token = value.trim();
+            await this.plugin.saveAndRefreshSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName('Text Allowlist')
+      .setDesc('Comma-separated file extensions to sync locally (e.g. .md, .canvas, .txt).')
+      .addText((text) =>
+        text
+          .setPlaceholder('.md, .canvas, .txt')
+          .setValue(this.plugin.settings.textAllowlist.join(', '))
+          .onChange(async (value) => {
+            const parsed = value
+              .split(',')
+              .map((item) => item.trim())
+              .filter(Boolean);
+            this.plugin.settings.textAllowlist =
+              parsed.length > 0 ? parsed : [...DEFAULT_SETTINGS.textAllowlist];
+            await this.plugin.saveAndRefreshSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Sync .obsidian/ directory')
+      .setDesc('Include allowlisted text files inside .obsidian/ during sync.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.syncObsidianDir).onChange(async (value) => {
+          this.plugin.settings.syncObsidianDir = value;
+          await this.plugin.saveAndRefreshSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Attachment Folder')
+      .setDesc('Repository folder where pasted or dropped images are uploaded.')
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_SETTINGS.attachmentFolder)
+          .setValue(this.plugin.settings.attachmentFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.attachmentFolder =
+              value.trim() || DEFAULT_SETTINGS.attachmentFolder;
+            await this.plugin.saveAndRefreshSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Auto-sync on Open')
+      .setDesc('Automatically run a sync when Obsidian finishes loading.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoSyncOnOpen).onChange(async (value) => {
+          this.plugin.settings.autoSyncOnOpen = value;
+          await this.plugin.saveAndRefreshSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Enable on Desktop (Testing)')
+      .setDesc('Enable mobile-only sync and on-demand image loading on desktop for testing.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableOnDesktop).onChange(async (value) => {
+          this.plugin.settings.enableOnDesktop = value;
+          await this.plugin.saveAndRefreshSettings();
+        }),
+      );
+
+    const conflictBranch = this.plugin.syncState.activeConflictBranch;
+    new Setting(containerEl)
+      .setName('Clear Conflict State')
+      .setDesc(
+        conflictBranch
+          ? `Active conflict branch: ${conflictBranch}. Clear this after merging it on desktop.`
+          : 'No active conflict branch. Use this after merging a mobile-conflict branch on desktop.',
+      )
+      .addButton((button) =>
+        button
+          .setButtonText('Clear Conflict State')
+          .setDisabled(!conflictBranch)
+          .onClick(async () => {
+            this.plugin.syncState.activeConflictBranch = null;
+            await this.plugin.savePluginData();
+            new Notice('GitLab conflict state cleared.');
+            this.display();
+          }),
+      );
+  }
+}
