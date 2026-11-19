@@ -482,18 +482,16 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       };
     }
 
-    const wrap = document.createElement('div');
-    wrap.className = 'gitlab-sync-progress-wrap';
+    const wrap = createDiv({ cls: 'gitlab-sync-progress-wrap' });
 
-    const textEl = document.createElement('div');
-    textEl.className = 'gitlab-sync-progress-text';
-    textEl.textContent = 'Git Sync: Starting...';
+    const textEl = wrap.createDiv({
+      cls: 'gitlab-sync-progress-text',
+      text: 'Git Sync: Starting...',
+    });
 
-    const barEl = document.createElement('progress');
-    barEl.className = 'gitlab-sync-progress-bar';
+    const barEl = wrap.createEl('progress', { cls: 'gitlab-sync-progress-bar' });
 
-    wrap.append(textEl, barEl);
-    const frag = document.createDocumentFragment();
+    const frag = createFragment();
     frag.appendChild(wrap);
     const notice = new Notice(frag, 0);
 

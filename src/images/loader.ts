@@ -557,28 +557,23 @@ export class OnDemandImageLoader {
     this.removeErrorBox(imgEl);
     imgEl.classList?.add('gitlab-img-hidden');
 
-    const box = document.createElement('div');
-    box.className = isError ? 'gitlab-img-error-box' : 'gitlab-img-status-box';
+    const box = createDiv({
+      cls: isError ? 'gitlab-img-error-box' : 'gitlab-img-status-box',
+    });
 
-    const textEl = document.createElement('span');
-    textEl.className = 'gitlab-img-error-text';
-    textEl.textContent = message;
-    box.appendChild(textEl);
+    box.createSpan({ cls: 'gitlab-img-error-text', text: message });
 
-    const reloadBtn = document.createElement('button');
-    reloadBtn.type = 'button';
-    reloadBtn.className = 'gitlab-img-reload-btn';
+    const reloadBtn = box.createEl('button', {
+      cls: 'gitlab-img-reload-btn',
+      attr: { type: 'button' },
+    });
 
     if (typeof setIcon === 'function') {
-      const iconEl = document.createElement('span');
-      iconEl.className = 'gitlab-img-reload-icon';
+      const iconEl = reloadBtn.createSpan({ cls: 'gitlab-img-reload-icon' });
       setIcon(iconEl, 'rotate-cw');
-      reloadBtn.appendChild(iconEl);
     }
 
-    const labelEl = document.createElement('span');
-    labelEl.textContent = 'Reload';
-    reloadBtn.appendChild(labelEl);
+    reloadBtn.createSpan({ text: 'Reload' });
 
     const stopEditorPointer = (ev: Event): void => {
       ev.stopPropagation();

@@ -120,17 +120,13 @@ class RemoteImageWidget extends WidgetType {
   }
 
   override toDOM(): HTMLElement {
-    const container = document.createElement('span');
-    container.className = 'gitlab-ondemand-embed';
+    const container = createSpan({ cls: 'gitlab-ondemand-embed' });
 
-    const imgEl = document.createElement('img');
-    imgEl.className = 'gitlab-ondemand-img';
+    const imgEl = container.createEl('img', { cls: 'gitlab-ondemand-img' });
     if (this.alt) {
       imgEl.alt = this.alt;
     }
     applyImageWidth(imgEl, this.width);
-
-    container.appendChild(imgEl);
 
     const cleanup = this.getContext().loader.observeAndLoad(
       imgEl,

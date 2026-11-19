@@ -247,50 +247,34 @@ export class UnusedImagesModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
 
-    const titleEl = document.createElement('h2');
-    titleEl.textContent = 'Clean Up Unused Remote Images';
-    contentEl.appendChild(titleEl);
+    contentEl.createEl('h2', { text: 'Clean Up Unused Remote Images' });
 
-    const descEl = document.createElement('p');
-    descEl.textContent = `Found ${this.opts.unusedPaths.length} image(s) not referenced in any note on branch "${this.opts.branch}".`;
-    contentEl.appendChild(descEl);
+    contentEl.createEl('p', {
+      text: `Found ${this.opts.unusedPaths.length} image(s) not referenced in any note on branch "${this.opts.branch}".`,
+    });
 
-    const controlsEl = document.createElement('div');
-    controlsEl.className = 'gitlab-cleanup-modal-controls';
-    const toggleAllBtn = document.createElement('button');
-    toggleAllBtn.type = 'button';
-    controlsEl.appendChild(toggleAllBtn);
-    contentEl.appendChild(controlsEl);
+    const controlsEl = contentEl.createDiv({ cls: 'gitlab-cleanup-modal-controls' });
+    const toggleAllBtn = controlsEl.createEl('button', { attr: { type: 'button' } });
 
-    const listEl = document.createElement('div');
-    listEl.className = 'gitlab-cleanup-modal-list';
-    contentEl.appendChild(listEl);
+    const listEl = contentEl.createDiv({ cls: 'gitlab-cleanup-modal-list' });
 
     const checkboxes: Array<{ path: string; input: HTMLInputElement }> = [];
     for (const filePath of this.opts.unusedPaths) {
-      const itemEl = document.createElement('div');
-      itemEl.className = 'gitlab-cleanup-modal-item';
+      const itemEl = listEl.createDiv({ cls: 'gitlab-cleanup-modal-item' });
 
-      const labelEl = document.createElement('label');
-      labelEl.className = 'gitlab-cleanup-modal-label';
+      const labelEl = itemEl.createEl('label', { cls: 'gitlab-cleanup-modal-label' });
 
-      const checkbox = document.createElement('input');
-      checkbox.type = 'checkbox';
+      const checkbox = labelEl.createEl('input', { type: 'checkbox' });
       checkbox.checked = true;
 
-      const labelText = document.createElement('span');
-      labelText.textContent = filePath;
-      labelEl.append(checkbox, labelText);
+      labelEl.createSpan({ text: filePath });
 
-      const thumbWrap = document.createElement('div');
-      thumbWrap.className = 'gitlab-cleanup-modal-thumb';
-      const thumbImg = document.createElement('img');
-      thumbImg.className = 'gitlab-cleanup-thumb-img';
-      thumbImg.alt = filePath;
-      thumbWrap.appendChild(thumbImg);
+      const thumbWrap = itemEl.createDiv({ cls: 'gitlab-cleanup-modal-thumb' });
+      const thumbImg = thumbWrap.createEl('img', {
+        cls: 'gitlab-cleanup-thumb-img',
+        attr: { alt: filePath },
+      });
 
-      itemEl.append(labelEl, thumbWrap);
-      listEl.appendChild(itemEl);
       checkboxes.push({ path: filePath, input: checkbox });
 
       if (this.opts.loader) {
@@ -300,20 +284,18 @@ export class UnusedImagesModal extends Modal {
       }
     }
 
-    const actionsEl = document.createElement('div');
-    actionsEl.className = 'gitlab-cleanup-modal-actions';
+    const actionsEl = contentEl.createDiv({ cls: 'gitlab-cleanup-modal-actions' });
 
-    const cancelBtn = document.createElement('button');
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = 'Cancel';
+    const cancelBtn = actionsEl.createEl('button', {
+      text: 'Cancel',
+      attr: { type: 'button' },
+    });
     cancelBtn.addEventListener('click', () => this.close());
 
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.className = 'mod-warning';
-
-    actionsEl.append(cancelBtn, deleteBtn);
-    contentEl.appendChild(actionsEl);
+    const deleteBtn = actionsEl.createEl('button', {
+      cls: 'mod-warning',
+      attr: { type: 'button' },
+    });
 
     let submitting = false;
 

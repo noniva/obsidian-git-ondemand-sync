@@ -84,7 +84,7 @@ export function hydrateRemoteEmbed(
     parseWidthAttr(embedEl.getAttribute('width')) ??
     parseWidthAttr(altAttr);
 
-  const imgEl = document.createElement('img');
+  const imgEl = createEl('img');
   applyImageAttributes(imgEl, parsed.alt ?? altAttr, width);
 
   embedEl.dataset.gitlabProcessed = 'true';

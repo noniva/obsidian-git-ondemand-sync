@@ -11,5 +11,9 @@ export default tseslint.config(
         project: './tsconfig.json',
       },
     },
+    rules: {
+      // Disabled: minAppVersion is 1.4.0 and obsidian@^1.7.2 predates 1.13.0+ getSettingDefinitions().
+      'obsidianmd/settings-tab/prefer-setting-definitions': 'off',
+    },
   },
 );

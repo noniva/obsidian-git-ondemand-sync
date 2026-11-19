@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs --watch",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
-    "lint": "eslint src",
+    "lint": "eslint src --max-warnings=0",
     "test": "vitest run"
   },
   "keywords": [

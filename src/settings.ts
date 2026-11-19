@@ -13,7 +13,7 @@ const DEFAULT_API_URLS: Record<GitProvider, string> = {
  */
 export class GitLabSyncSettingTab extends PluginSettingTab {
   private readonly plugin: GitLabOnDemandSyncPlugin;
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private saveTimer: number | null = null;
 
   constructor(app: App, plugin: GitLabOnDemandSyncPlugin) {
     super(app, plugin);

@@ -51,7 +51,7 @@ export async function compressImageForUpload(
     const targetW = Math.max(1, Math.round(bitmap.width * scale));
     const targetH = Math.max(1, Math.round(bitmap.height * scale));
 
-    const canvas = document.createElement('canvas');
+    const canvas = createEl('canvas');
     canvas.width = targetW;
     canvas.height = targetH;
     const ctx = canvas.getContext('2d');

@@ -98,30 +98,33 @@ if (typeof document !== 'undefined' && typeof HTMLElement !== 'undefined') {
       writable: true,
     });
   }
+}
 
-  const g = globalThis as Record<string, unknown>;
-  if (typeof g.createEl !== 'function') {
-    g.createEl = <K extends keyof HTMLElementTagNameMap>(
-      tag: K,
-      options?: DomCreateOptions,
-    ): HTMLElementTagNameMap[K] => {
-      const el = document.createElement(tag);
-      applyDomCreateOptions(el, options);
-      return el;
-    };
-  }
-  if (typeof g.createDiv !== 'function') {
-    g.createDiv = (options?: DomCreateOptions): HTMLDivElement => {
-      const el = document.createElement('div');
-      applyDomCreateOptions(el, options);
-      return el;
-    };
-  }
-  if (typeof g.createSpan !== 'function') {
-    g.createSpan = (options?: DomCreateOptions): HTMLSpanElement => {
-      const el = document.createElement('span');
-      applyDomCreateOptions(el, options);
-      return el;
-    };
-  }
+const g = globalThis as Record<string, unknown>;
+if (typeof g.createEl !== 'function') {
+  g.createEl = <K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    options?: DomCreateOptions,
+  ): HTMLElementTagNameMap[K] => {
+    const el = document.createElement(tag);
+    applyDomCreateOptions(el, options);
+    return el;
+  };
+}
+if (typeof g.createDiv !== 'function') {
+  g.createDiv = (options?: DomCreateOptions): HTMLDivElement => {
+    const el = document.createElement('div');
+    applyDomCreateOptions(el, options);
+    return el;
+  };
+}
+if (typeof g.createSpan !== 'function') {
+  g.createSpan = (options?: DomCreateOptions): HTMLSpanElement => {
+    const el = document.createElement('span');
+    applyDomCreateOptions(el, options);
+    return el;
+  };
+}
+if (typeof g.createFragment !== 'function') {
+  g.createFragment = (): DocumentFragment => document.createDocumentFragment();
 }

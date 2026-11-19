@@ -95,7 +95,7 @@ export async function sendRemoteRequest(opts: {
   const method = opts.method ?? 'GET';
 
   for (let attempt = 0; attempt <= opts.maxRateLimitRetries; attempt++) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: number | undefined;
     let timedOut = false;
     let res: RequestUrlResponse;
     try {
