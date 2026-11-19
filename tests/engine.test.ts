@@ -553,10 +553,15 @@ describe('SyncEngine', () => {
     expect(state.conflictPushedHashes).toBeUndefined();
     expect(state.lastSyncedCommitSha).toBe('c_merged');
     expect(state.files['merged.md']).toEqual({ blobSha: 'r_merged', contentHash: await sha256Hex(mergedOnDesktop) });
+    expect(state.files['edited-later.md']).toEqual({
+      blobSha: 're_merged',
+      contentHash: await sha256Hex('older remote text'),
+    });
   });
 
   it('gives actionable 404 error if conflict branch was deleted on GitLab, aborts incremental pull before disk write, and guards target TOCTOU head movement', async () => {
     // 1. 404 on deleted activeConflictBranch
+    const raw404Error = new Error('GitLab API GET failed (404): 404 Branch Not Found');
     const state404: SyncState = {
       lastSyncedCommitSha: 'c0',
       activeConflictBranch: 'mobile-conflict/deleted',
@@ -567,14 +572,21 @@ describe('SyncEngine', () => {
       getBranchHead: vi
         .fn()
         .mockResolvedValueOnce('c1')
-        .mockRejectedValueOnce(new Error('GitLab API GET failed (404): 404 Branch Not Found')),
+        .mockRejectedValueOnce(raw404Error),
       getTreeRecursive: vi.fn().mockResolvedValue([]),
       getRawText: vi.fn(),
       createCommit: vi.fn(),
     } as any;
     const vaultEmpty = { listTextFiles: async () => [], readText: async () => '', writeText: vi.fn(), deleteFile: vi.fn() };
     const engine404 = new SyncEngine({ settings: DEFAULT_SETTINGS, state: state404, client: client404, vault: vaultEmpty, saveState: vi.fn() });
-    await expect(engine404.sync()).rejects.toThrow(/Clear Conflict State/i);
+    try {
+      await engine404.sync();
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/Clear Conflict State/i);
+      expect((err as Error & { cause?: unknown }).cause).toBe(raw404Error);
+    }
 
     // 2. Incremental pull failure must not write partial files to disk
     const incFiles: Record<string, string> = {};
@@ -689,5 +701,86 @@ describe('SyncEngine', () => {
     expect(incState.files['a.md']?.blobSha).toBe('1');
     expect(incState.files['b.md']).toBeUndefined();
     expect(incSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('clearConflictBranch saves partial adoption and preserves activeConflictBranch when writeText fails mid-apply, and applyPulls cleans stale conflict markers', async () => {
+    // 1. clearConflictBranch mid-apply writeText failure on file #2
+    const files: Record<string, string> = { 'a.md': 'pushed a', 'b.md': 'pushed b' };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261119-050000',
+      files: {
+        'a.md': { blobSha: 'ra0', contentHash: 'ha0' },
+        'b.md': { blobSha: 'rb0', contentHash: 'hb0' },
+      },
+      remoteImagePaths: [],
+      conflictPushedHashes: {
+        'a.md': await sha256Hex('pushed a'),
+        'b.md': await sha256Hex('pushed b'),
+      },
+      conflictDeletedPaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c_merged'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'ra1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+        { id: 'rb1', name: 'b.md', type: 'blob', path: 'b.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn(async (p: string) => (p === 'a.md' ? 'merged a' : 'merged b')),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: vi.fn()
+        .mockImplementationOnce(async (p: string, c: string) => { files[p] = c; })
+        .mockRejectedValueOnce(new Error('Disk full')),
+      deleteFile: vi.fn(),
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState });
+
+    await expect(engine.clearConflictBranch()).rejects.toThrow('Disk full');
+    expect(saveState).toHaveBeenCalledTimes(1);
+    expect(state.activeConflictBranch).toBe('mobile-conflict/20261119-050000');
+    expect(state.lastSyncedCommitSha).toBe('c0');
+    expect(files['a.md']).toBe('merged a');
+    expect(files['b.md']).toBe('pushed b');
+    expect(state.files['a.md']).toEqual({ blobSha: 'ra1', contentHash: await sha256Hex('merged a') });
+    expect(state.conflictPushedHashes).toEqual({ 'b.md': await sha256Hex('pushed b') });
+
+    // 2. applyPulls cleans stale conflictPushedHashes and conflictDeletedPaths on pulled overwrite/delete
+    const pullFiles: Record<string, string> = { 'p.md': 'base p', 'd.md': 'base d' };
+    const pullState: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261119-050000',
+      files: {
+        'p.md': { blobSha: 'rp0', contentHash: await sha256Hex('base p') },
+        'd.md': { blobSha: 'rd0', contentHash: await sha256Hex('base d') },
+      },
+      remoteImagePaths: [],
+      conflictPushedHashes: { 'p.md': 'stale-p-hash', 'keep.md': 'keep-hash' },
+      conflictDeletedPaths: ['p.md', 'd.md', 'keep-del.md'],
+    };
+    const pullClient = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn()
+        .mockResolvedValueOnce([{ id: 'rp1', name: 'p.md', type: 'blob', path: 'p.md', mode: '100644' }])
+        .mockResolvedValueOnce([]),
+      getRawText: vi.fn().mockResolvedValue('remote updated p'),
+      createCommit: vi.fn(),
+    } as any;
+    const pullVault = {
+      listTextFiles: async () => Object.keys(pullFiles),
+      readText: async (p: string) => pullFiles[p],
+      writeText: async (p: string, c: string) => { pullFiles[p] = c; },
+      deleteFile: async (p: string) => { delete pullFiles[p]; },
+    };
+    await new SyncEngine({ settings: DEFAULT_SETTINGS, state: pullState, client: pullClient, vault: pullVault, saveState: vi.fn() }).sync();
+
+    expect(pullFiles['p.md']).toBe('remote updated p');
+    expect(pullFiles['d.md']).toBeUndefined();
+    expect(pullState.conflictPushedHashes).toEqual({ 'keep.md': 'keep-hash' });
+    expect(pullState.conflictDeletedPaths).toEqual(['keep-del.md']);
   });
 });

@@ -264,44 +264,65 @@ export class SyncEngine {
       });
     }
 
-    for (const [path, remote] of remoteFiles) {
-      const localHash = localHashes[path];
-      if (
-        this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet) &&
-        localHash !== remote.hash
-      ) {
-        await this.vault.writeText(path, remote.text);
+    let mutated = false;
+    let completed = false;
+    try {
+      for (const [path, remote] of remoteFiles) {
+        const localHash = localHashes[path];
+        if (
+          this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet) &&
+          localHash !== remote.hash
+        ) {
+          await this.vault.writeText(path, remote.text);
+        }
+        this.state.files[path] = {
+          blobSha: remote.blobSha,
+          contentHash: remote.hash,
+        };
+        this.clearConflictMarker(path);
+        mutated = true;
       }
-      this.state.files[path] = {
-        blobSha: remote.blobSha,
-        contentHash: remote.hash,
-      };
-    }
 
-    const trackedOrConflictPaths = new Set([
-      ...Object.keys(this.state.files),
-      ...Object.keys(this.state.conflictPushedHashes ?? {}),
-      ...(this.state.conflictDeletedPaths ?? []),
-    ]);
-    for (const path of trackedOrConflictPaths) {
-      if (remoteTextPaths.has(path) || !this.isAllowlistedText(path)) {
-        continue;
+      const trackedOrConflictPaths = new Set([
+        ...Object.keys(this.state.files),
+        ...Object.keys(this.state.conflictPushedHashes ?? {}),
+        ...(this.state.conflictDeletedPaths ?? []),
+      ]);
+      for (const path of trackedOrConflictPaths) {
+        if (remoteTextPaths.has(path) || !this.isAllowlistedText(path)) {
+          continue;
+        }
+        const localHash = localHashes[path];
+        if (
+          localHash !== undefined &&
+          this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet)
+        ) {
+          await this.vault.deleteFile(path);
+        }
+        delete this.state.files[path];
+        this.clearConflictMarker(path);
+        mutated = true;
       }
-      const localHash = localHashes[path];
-      if (
-        localHash !== undefined &&
-        this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet)
-      ) {
-        await this.vault.deleteFile(path);
-      }
-      delete this.state.files[path];
-    }
 
-    this.state.activeConflictBranch = null;
-    delete this.state.conflictPushedHashes;
-    delete this.state.conflictDeletedPaths;
-    this.state.lastSyncedCommitSha = headSha;
-    await this.saveState();
+      this.state.activeConflictBranch = null;
+      delete this.state.conflictPushedHashes;
+      delete this.state.conflictDeletedPaths;
+      this.state.lastSyncedCommitSha = headSha;
+      completed = true;
+    } finally {
+      if (completed || mutated) {
+        await this.saveState();
+      }
+    }
+  }
+
+  private clearConflictMarker(path: string): void {
+    if (this.state.conflictPushedHashes) {
+      delete this.state.conflictPushedHashes[path];
+    }
+    if (this.state.conflictDeletedPaths) {
+      this.state.conflictDeletedPaths = this.state.conflictDeletedPaths.filter((p) => p !== path);
+    }
   }
 
   private isUntouchedSinceConflict(
@@ -455,12 +476,14 @@ export class SyncEngine {
           blobSha: remoteTextFiles[path],
           contentHash,
         };
+        this.clearConflictMarker(path);
         mutated = true;
       }
 
       for (const path of plan.pullDeletes) {
         await this.vault.deleteFile(path);
         delete this.state.files[path];
+        this.clearConflictMarker(path);
         mutated = true;
       }
     } finally {
