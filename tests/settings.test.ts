@@ -41,12 +41,18 @@ function createMockPlugin(
       remoteImagePaths: [],
       ...syncStateOverrides,
     },
+    lastSyncStatus: 'Not synced yet',
+    lastSyncError: null as string | null,
     saveAndRefreshSettings: vi.fn().mockResolvedValue(undefined),
     clearConflictState: vi.fn().mockResolvedValue(undefined),
+    syncWithNotice: vi.fn().mockResolvedValue(undefined),
   };
   return plugin as unknown as GitLabOnDemandSyncPlugin & {
+    lastSyncStatus: string;
+    lastSyncError: string | null;
     saveAndRefreshSettings: ReturnType<typeof vi.fn>;
     clearConflictState: ReturnType<typeof vi.fn>;
+    syncWithNotice: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -199,5 +205,34 @@ describe('GitLabSyncSettingTab', () => {
     await vi.waitFor(() => expect(noticeMessages).toHaveLength(2));
     expect(noticeMessages[1]).toBe('GitLab conflict state cleared.');
     expect(getClearBtn().disabled).toBe(true);
+  });
+
+  it('displays Last Sync Status, marks error state, and triggers Sync Now button', async () => {
+    const plugin = createMockPlugin();
+    plugin.lastSyncError = 'GitLab API GET failed (401): Unauthorized';
+    plugin.lastSyncStatus = `Failed: ${plugin.lastSyncError}`;
+
+    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    tab.display();
+
+    const statusRow = findSettingRow(tab.containerEl, 'Last Sync Status');
+    const descEl = statusRow.querySelector('.setting-item-description')!;
+    expect(descEl.textContent).toContain('401');
+    expect(descEl.classList.contains('gitlab-sync-status-error')).toBe(true);
+
+    const syncBtn = statusRow.querySelector('button')!;
+    expect(syncBtn.textContent).toBe('Sync Now');
+    plugin.syncWithNotice.mockImplementationOnce(async () => {
+      plugin.lastSyncError = null;
+      plugin.lastSyncStatus = '1 pulled, 0 pushed, 0 deleted (2 remote images indexed)';
+    });
+    syncBtn.click();
+
+    await vi.waitFor(() => expect(plugin.syncWithNotice).toHaveBeenCalledTimes(1));
+    const refreshedDesc = findSettingRow(tab.containerEl, 'Last Sync Status').querySelector(
+      '.setting-item-description',
+    )!;
+    expect(refreshedDesc.textContent).toContain('1 pulled');
+    expect(refreshedDesc.classList.contains('gitlab-sync-status-error')).toBe(false);
   });
 });

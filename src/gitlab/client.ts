@@ -74,7 +74,10 @@ export class GitLabClient {
   }
 
   /** Fetches all tree entries recursively for a ref, following GitLab `x-next-page` pagination. */
-  async getTreeRecursive(ref: string): Promise<GitLabTreeEntry[]> {
+  async getTreeRecursive(
+    ref: string,
+    onPage?: (info: { page: number; totalPages?: number; entries: number }) => void,
+  ): Promise<GitLabTreeEntry[]> {
     const entries: GitLabTreeEntry[] = [];
     const encodedRef = encodeURIComponent(ref);
     const seenPages = new Set<string>(['1']);
@@ -88,6 +91,15 @@ export class GitLabClient {
         throw new Error('GitLab API returned unexpected non-array response for repository tree');
       }
       entries.push(...(res.json as GitLabTreeEntry[]));
+
+      const rawTotalPages = getHeaderCaseInsensitive(res.headers, 'x-total-pages')?.trim();
+      const parsedTotal = rawTotalPages ? Number(rawTotalPages) : Number.NaN;
+      const totalPages = Number.isInteger(parsedTotal) && parsedTotal > 0 ? parsedTotal : undefined;
+      onPage?.({
+        page: Number(page) || seenPages.size,
+        totalPages,
+        entries: entries.length,
+      });
 
       const nextPage = getHeaderCaseInsensitive(res.headers, 'x-next-page')?.trim() ?? '';
       if (nextPage) {

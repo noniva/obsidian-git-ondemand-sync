@@ -181,4 +181,35 @@ describe('GitLabClient', () => {
       expect((err as Error & { cause?: unknown }).cause).toBe(rootCause);
     }
   });
+
+  it('invokes onPage callback with page, totalPages, and running entries count during getTreeRecursive', async () => {
+    const req = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        json: [{ id: '1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' }],
+        headers: { 'x-next-page': '2', 'X-Total-Pages': '2' },
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        json: [
+          { id: '2', name: 'b.md', type: 'blob', path: 'b.md', mode: '100644' },
+          { id: '3', name: 'c.md', type: 'blob', path: 'c.md', mode: '100644' },
+        ],
+        headers: { 'x-next-page': '', 'x-total-pages': '2' },
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+      });
+    const client = new GitLabClient(cfg, req);
+    const pages: Array<{ page: number; totalPages?: number; entries: number }> = [];
+    const entries = await client.getTreeRecursive('abc123', (info) => pages.push(info));
+
+    expect(entries).toHaveLength(3);
+    expect(pages).toEqual([
+      { page: 1, totalPages: 2, entries: 1 },
+      { page: 2, totalPages: 2, entries: 3 },
+    ]);
+  });
 });

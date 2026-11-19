@@ -28,3 +28,24 @@
   font-size: var(--font-ui-small);
   background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
 }
+
+.gitlab-sync-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.gitlab-sync-progress-text {
+  font-size: var(--font-ui-small);
+}
+
+.gitlab-sync-progress-bar {
+  width: 100%;
+  height: 8px;
+}
+
+.gitlab-sync-status-error {
+  color: var(--text-error);
+  word-break: break-word;
+}

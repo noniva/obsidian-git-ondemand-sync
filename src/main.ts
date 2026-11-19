@@ -9,7 +9,7 @@ import { OnDemandImageLoader } from './images/loader';
 import { registerMobileImageUpload } from './images/paste-upload';
 import { type ImageRenderContext, registerReadingViewImageProcessor } from './images/reading-view';
 import { GitLabSyncSettingTab } from './settings';
-import { SyncEngine, type VaultTextAdapter } from './sync/engine';
+import { SyncEngine, type SyncProgress, type VaultTextAdapter } from './sync/engine';
 import { DEFAULT_SETTINGS, type PluginSettings, type SyncState } from './types';
 import { isIgnoredPath, isTextSyncPath, normalizeVaultPath } from './utils/paths';
 
@@ -34,9 +34,12 @@ function createDefaultSyncState(): SyncState {
 export default class GitLabOnDemandSyncPlugin extends Plugin {
   settings: PluginSettings = { ...DEFAULT_SETTINGS };
   syncState: SyncState = createDefaultSyncState();
+  lastSyncStatus = 'Not synced yet';
+  lastSyncError: string | null = null;
 
   private client!: GitLabClient;
   private loader!: OnDemandImageLoader;
+  private statusBarEl: HTMLElement | null = null;
   private isSyncing = false;
 
   override async onload(): Promise<void> {
@@ -49,6 +52,9 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     });
 
     this.addSettingTab(new GitLabSyncSettingTab(this.app, this));
+
+    this.statusBarEl = this.addStatusBarItem?.() ?? null;
+    this.updateStatusBar('GitLab: Idle');
 
     this.addRibbonIcon('refresh-cw', 'Sync with GitLab', () => {
       void this.syncWithNotice();
@@ -283,7 +289,72 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     };
   }
 
-  private createSyncEngine(): SyncEngine {
+  private updateStatusBar(text: string): void {
+    if (this.statusBarEl) {
+      this.statusBarEl.textContent = text;
+    }
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    const base = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
+    if (cause instanceof Error && cause.message && !base.includes(cause.message)) {
+      return `${base} (${cause.message})`;
+    }
+    return base;
+  }
+
+  private createSyncProgressNotice(): {
+    notice: Notice;
+    update: (progress: SyncProgress) => void;
+  } {
+    if (typeof document === 'undefined') {
+      const notice = new Notice('GitLab Sync: Starting...', 0);
+      return {
+        notice,
+        update: (progress) => {
+          notice.setMessage?.(`GitLab Sync: ${progress.message}`);
+          this.updateStatusBar(`GitLab: ${progress.message}`);
+        },
+      };
+    }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'gitlab-sync-progress-wrap';
+
+    const textEl = document.createElement('div');
+    textEl.className = 'gitlab-sync-progress-text';
+    textEl.textContent = 'GitLab Sync: Starting...';
+
+    const barEl = document.createElement('progress');
+    barEl.className = 'gitlab-sync-progress-bar';
+
+    wrap.append(textEl, barEl);
+    const frag = document.createDocumentFragment();
+    frag.appendChild(wrap);
+    const notice = new Notice(frag, 0);
+
+    return {
+      notice,
+      update: (progress) => {
+        textEl.textContent = `GitLab Sync: ${progress.message}`;
+        if (
+          typeof progress.current === 'number' &&
+          typeof progress.total === 'number' &&
+          progress.total > 0
+        ) {
+          barEl.max = progress.total;
+          barEl.value = Math.min(progress.current, progress.total);
+        } else {
+          barEl.removeAttribute('value');
+          barEl.removeAttribute('max');
+        }
+        this.updateStatusBar(`GitLab: ${progress.message}`);
+      },
+    };
+  }
+
+  private createSyncEngine(onProgress?: (progress: SyncProgress) => void): SyncEngine {
     return new SyncEngine({
       settings: this.settings,
       state: this.syncState,
@@ -291,6 +362,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       vault: this.createVaultAdapter(),
       saveState: () => this.savePluginData(),
       configDir: this.getConfigDir(),
+      onProgress,
     });
   }
 
@@ -321,24 +393,38 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     }
 
     this.isSyncing = true;
-    try {
-      const engine = this.createSyncEngine();
+    this.updateStatusBar('GitLab: Syncing...');
+    const progressUi = this.createSyncProgressNotice();
 
+    try {
+      const engine = this.createSyncEngine((progress) => progressUi.update(progress));
       const res = await engine.sync();
+      progressUi.notice.hide?.();
+
       this.refreshOpenEditors();
+      this.lastSyncError = null;
+
       if (res.conflictBranch) {
+        this.lastSyncStatus = `Conflict pushed to ${res.conflictBranch}`;
+        this.updateStatusBar('GitLab: Conflict');
         new Notice(
           `GitLab sync conflict! Local changes were pushed to branch "${res.conflictBranch}". On desktop, run: git fetch && git merge origin/${res.conflictBranch}`,
           15000,
         );
       } else {
-        new Notice(
-          `GitLab sync complete: ${res.pulled} pulled, ${res.pushed} pushed, ${res.deletedLocal} deleted.`,
-        );
+        const summary = `${res.pulled} pulled, ${res.pushed} pushed, ${res.deletedLocal} deleted (${this.syncState.remoteImagePaths.length} remote images indexed)`;
+        this.lastSyncStatus = summary;
+        this.updateStatusBar('GitLab: Synced');
+        new Notice(`GitLab sync complete: ${summary}.`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      new Notice(`GitLab sync failed: ${message}`, 8000);
+      progressUi.notice.hide?.();
+      console.error('[GitLab On-Demand Sync] Sync failed:', error);
+      const message = this.formatErrorMessage(error);
+      this.lastSyncError = message;
+      this.lastSyncStatus = `Failed: ${message}`;
+      this.updateStatusBar('GitLab: Sync failed');
+      new Notice(`GitLab sync failed: ${message} (click to dismiss)`, 0);
     } finally {
       this.isSyncing = false;
     }

@@ -40,10 +40,42 @@ export const editorInfoField = StateField.define<MockMarkdownFileInfo>({
 export class Notice {
   message: string;
   timeout?: number;
+  messageEl: HTMLElement;
+  noticeEl: HTMLElement;
+  hidden = false;
 
-  constructor(message: string, timeout?: number) {
-    this.message = message;
+  constructor(message: string | DocumentFragment, timeout?: number) {
+    this.message = typeof message === 'string' ? message : (message.textContent ?? '');
     this.timeout = timeout;
+    if (typeof document !== 'undefined') {
+      const el = document.createElement('div');
+      if (typeof message === 'string') {
+        el.textContent = message;
+      } else {
+        el.appendChild(message);
+      }
+      this.messageEl = el;
+      this.noticeEl = el;
+    } else {
+      this.messageEl = {} as HTMLElement;
+      this.noticeEl = this.messageEl;
+    }
+  }
+
+  setMessage(message: string | DocumentFragment): this {
+    this.message = typeof message === 'string' ? message : (message.textContent ?? '');
+    if (typeof document !== 'undefined') {
+      if (typeof message === 'string') {
+        this.messageEl.textContent = message;
+      } else {
+        this.messageEl.replaceChildren(message);
+      }
+    }
+    return this;
+  }
+
+  hide(): void {
+    this.hidden = true;
   }
 }
 
@@ -82,6 +114,13 @@ export class Plugin {
 
   addRibbonIcon(_icon: string, _title: string, _cb: () => unknown): unknown {
     return {};
+  }
+
+  addStatusBarItem(): HTMLElement {
+    if (typeof document !== 'undefined') {
+      return document.createElement('div');
+    }
+    return { textContent: '' } as unknown as HTMLElement;
   }
 
   addSettingTab(_tab: unknown): void {}

@@ -783,4 +783,80 @@ describe('SyncEngine', () => {
     expect(pullState.conflictPushedHashes).toEqual({ 'keep.md': 'keep-hash' });
     expect(pullState.conflictDeletedPaths).toEqual(['keep-del.md']);
   });
+
+  it('emits sync progress stages and bounds concurrent note downloads', async () => {
+    const files: Record<string, string> = {};
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const resolvers: Array<() => void> = [];
+    const treeEntries = Array.from({ length: 5 }, (_, idx) => ({
+      id: `b${idx}`,
+      name: `n${idx}.md`,
+      type: 'blob' as const,
+      path: `n${idx}.md`,
+      mode: '100644',
+    }));
+
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('head1'),
+      getTreeRecursive: vi.fn(
+        async (_ref: string, onPage?: (info: { page: number; totalPages?: number; entries: number }) => void) => {
+          onPage?.({ page: 1, totalPages: 2, entries: 5 });
+          return treeEntries;
+        },
+      ),
+      getRawText: vi.fn(async (p: string) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+          if (inFlight <= 2) {
+            setTimeout(() => {
+              inFlight--;
+              resolve();
+            }, 5);
+          } else {
+            inFlight--;
+            resolve();
+          }
+        });
+        return `# ${p}`;
+      }),
+      createCommit: vi.fn(),
+    } as any;
+
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+
+    const events: Array<{ stage: string; current?: number; total?: number; message: string }> = [];
+    const engine = new SyncEngine({
+      settings: DEFAULT_SETTINGS,
+      state,
+      client,
+      vault,
+      saveState: vi.fn(),
+      downloadConcurrency: 2,
+      onProgress: (p) => events.push({ ...p }),
+    });
+
+    await engine.sync();
+
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+    expect(Object.keys(files)).toHaveLength(5);
+    expect(events.some((e) => e.stage === 'checking')).toBe(true);
+    expect(events.some((e) => e.stage === 'tree' && e.current === 1 && e.total === 2)).toBe(true);
+    expect(events.some((e) => e.stage === 'pulling' && e.current === 5 && e.total === 5)).toBe(true);
+    expect(events.some((e) => e.stage === 'writing' && e.current === 5 && e.total === 5)).toBe(true);
+  });
 });

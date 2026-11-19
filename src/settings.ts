@@ -38,6 +38,23 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    const statusSetting = new Setting(containerEl)
+      .setName('Last Sync Status')
+      .setDesc(
+        this.plugin.lastSyncError
+          ? `Error: ${this.plugin.lastSyncError}`
+          : this.plugin.lastSyncStatus,
+      )
+      .addButton((button) =>
+        button.setButtonText('Sync Now').onClick(async () => {
+          await this.plugin.syncWithNotice();
+          this.display();
+        }),
+      );
+    if (this.plugin.lastSyncError) {
+      statusSetting.descEl?.classList?.add('gitlab-sync-status-error');
+    }
+
     new Setting(containerEl)
       .setName('GitLab Base URL')
       .setDesc('Base URL of your GitLab instance (e.g. https://gitlab.com).')

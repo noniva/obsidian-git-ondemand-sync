@@ -18,6 +18,13 @@ export interface SyncResult {
   headCommitSha: string;
 }
 
+export interface SyncProgress {
+  stage: 'checking' | 'tree' | 'pulling' | 'writing' | 'pushing';
+  message: string;
+  current?: number;
+  total?: number;
+}
+
 export interface SyncEngineOptions {
   settings: PluginSettings;
   state: SyncState;
@@ -26,6 +33,8 @@ export interface SyncEngineOptions {
   saveState: () => Promise<void> | void;
   now?: () => Date;
   configDir?: string;
+  onProgress?: (progress: SyncProgress) => void;
+  downloadConcurrency?: number;
 }
 
 function formatConflictBranchName(date: Date): string {
@@ -85,6 +94,8 @@ export class SyncEngine {
   private readonly saveState: () => Promise<void> | void;
   private readonly now: () => Date;
   private readonly configDir: string;
+  private readonly onProgress?: (progress: SyncProgress) => void;
+  private readonly downloadConcurrency: number;
 
   constructor(options: SyncEngineOptions) {
     this.settings = options.settings;
@@ -94,6 +105,16 @@ export class SyncEngine {
     this.saveState = options.saveState;
     this.now = options.now ?? (() => new Date());
     this.configDir = options.configDir ?? '.obsidian';
+    this.onProgress = options.onProgress;
+    const rawConc = options.downloadConcurrency;
+    this.downloadConcurrency =
+      typeof rawConc === 'number' && Number.isFinite(rawConc)
+        ? Math.max(1, Math.floor(rawConc))
+        : 6;
+  }
+
+  private emitProgress(progress: SyncProgress): void {
+    this.onProgress?.(progress);
   }
 
   private isAllowlistedText(path: string): boolean {
@@ -118,8 +139,18 @@ export class SyncEngine {
       );
     }
 
+    this.emitProgress({ stage: 'checking', message: 'Checking remote branch...' });
     const headSha = await this.client.getBranchHead(this.settings.branch);
-    const tree = await this.client.getTreeRecursive(headSha);
+    const tree = await this.client.getTreeRecursive(headSha, (info) => {
+      this.emitProgress({
+        stage: 'tree',
+        message: info.totalPages
+          ? `Scanning repository (page ${info.page}/${info.totalPages}, ${info.entries} items)...`
+          : `Scanning repository (page ${info.page}, ${info.entries} items)...`,
+        current: info.page,
+        total: info.totalPages,
+      });
+    });
 
     const remoteTextFiles: Record<string, string> = {};
     const remoteImagePaths: string[] = [];
@@ -458,18 +489,57 @@ export class SyncEngine {
     headSha: string,
     remoteTextFiles: Record<string, string>,
   ): Promise<void> {
+    const totalDownloads = plan.pullDownloads.length;
     const downloaded = new Map<string, string>();
-    for (const path of plan.pullDownloads) {
-      downloaded.set(path, await this.client.getRawText(path, headSha));
+
+    if (totalDownloads > 0) {
+      let nextIdx = 0;
+      let completed = 0;
+      let failed = false;
+      this.emitProgress({
+        stage: 'pulling',
+        message: `Downloading notes (0/${totalDownloads})...`,
+        current: 0,
+        total: totalDownloads,
+      });
+
+      const workerCount = Math.min(this.downloadConcurrency, totalDownloads);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (!failed && nextIdx < totalDownloads) {
+          const path = plan.pullDownloads[nextIdx++];
+          try {
+            const text = await this.client.getRawText(path, headSha);
+            if (failed) {
+              return;
+            }
+            downloaded.set(path, text);
+            completed++;
+            this.emitProgress({
+              stage: 'pulling',
+              message: `Downloading notes (${completed}/${totalDownloads})...`,
+              current: completed,
+              total: totalDownloads,
+            });
+          } catch (err) {
+            failed = true;
+            throw err;
+          }
+        }
+      });
+
+      await Promise.all(workers);
     }
 
-    if (downloaded.size === 0 && plan.pullDeletes.length === 0) {
+    const totalWrites = downloaded.size + plan.pullDeletes.length;
+    if (totalWrites === 0) {
       return;
     }
 
+    let written = 0;
     let mutated = false;
     try {
-      for (const [path, content] of downloaded) {
+      for (const path of plan.pullDownloads) {
+        const content = downloaded.get(path)!;
         const contentHash = await sha256Hex(content);
         await this.vault.writeText(path, content);
         this.state.files[path] = {
@@ -478,6 +548,13 @@ export class SyncEngine {
         };
         this.clearConflictMarker(path);
         mutated = true;
+        written++;
+        this.emitProgress({
+          stage: 'writing',
+          message: `Writing notes (${written}/${totalWrites})...`,
+          current: written,
+          total: totalWrites,
+        });
       }
 
       for (const path of plan.pullDeletes) {
@@ -485,6 +562,13 @@ export class SyncEngine {
         delete this.state.files[path];
         this.clearConflictMarker(path);
         mutated = true;
+        written++;
+        this.emitProgress({
+          stage: 'writing',
+          message: `Writing notes (${written}/${totalWrites})...`,
+          current: written,
+          total: totalWrites,
+        });
       }
     } finally {
       if (mutated) {
@@ -505,6 +589,11 @@ export class SyncEngine {
       }
       return headSha;
     }
+
+    this.emitProgress({
+      stage: 'pushing',
+      message: `Pushing ${actions.length} change(s) to GitLab...`,
+    });
 
     if (plan.targetPushBranch === 'target') {
       const latestHead = await this.client.getBranchHead(this.settings.branch);

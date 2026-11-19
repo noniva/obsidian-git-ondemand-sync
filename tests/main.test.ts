@@ -1,8 +1,14 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { notices, requestUrlBox } = vi.hoisted(() => ({
+const { notices, noticeInstances, requestUrlBox } = vi.hoisted(() => ({
   notices: [] as Array<{ message: string; timeout?: number }>,
+  noticeInstances: [] as Array<{
+    message: string;
+    timeout?: number;
+    hidden: boolean;
+    messageEl: HTMLElement;
+  }>,
   requestUrlBox: {
     fn: (async () => {
       throw new Error('requestUrl handler not configured');
@@ -13,9 +19,33 @@ const { notices, requestUrlBox } = vi.hoisted(() => ({
 vi.mock('obsidian', async (importOriginal) => {
   const actual = await importOriginal<typeof import('obsidian')>();
   class SpyNotice extends actual.Notice {
-    constructor(message: string, timeout?: number) {
+    constructor(message: string | DocumentFragment, timeout?: number) {
       super(message, timeout);
-      notices.push({ message, timeout });
+      const record = {
+        message: this.message,
+        timeout,
+        hidden: false,
+        messageEl: this.messageEl,
+      };
+      notices.push(record);
+      noticeInstances.push(record);
+    }
+
+    override setMessage(message: string | DocumentFragment): this {
+      super.setMessage(message);
+      const last = noticeInstances[noticeInstances.length - 1];
+      if (last && last.messageEl === this.messageEl) {
+        last.message = this.message;
+      }
+      return this;
+    }
+
+    override hide(): void {
+      super.hide();
+      const idx = noticeInstances.findIndex((n) => n.messageEl === this.messageEl);
+      if (idx >= 0) {
+        noticeInstances[idx].hidden = true;
+      }
     }
   }
   return {
@@ -190,6 +220,7 @@ const TEST_MANIFEST = { id: 'gitlab-ondemand-sync', name: 'GitLab On-Demand Sync
 describe('GitLabOnDemandSyncPlugin', () => {
   beforeEach(() => {
     notices.length = 0;
+    noticeInstances.length = 0;
     Platform.isMobile = false;
     Platform.isDesktop = true;
     requestUrlBox.fn = async () => {
@@ -392,23 +423,37 @@ describe('GitLabOnDemandSyncPlugin', () => {
 
     const firstSync = plugin.syncWithNotice();
     await plugin.syncWithNotice();
-    expect(notices[0].message).toBe('GitLab sync is already in progress.');
+    const progressNotice = noticeInstances[0];
+    expect(progressNotice.timeout).toBe(0);
+    expect(notices[1].message).toBe('GitLab sync is already in progress.');
 
     releaseBranchFetch();
     await firstSync;
-    expect(notices[1].message).toBe('GitLab sync complete: 1 pulled, 0 pushed, 0 deleted.');
+    expect(progressNotice.hidden).toBe(true);
+    expect(progressNotice.messageEl.querySelector('.gitlab-sync-progress-bar')).not.toBeNull();
+    expect(notices[2].message).toBe(
+      'GitLab sync complete: 1 pulled, 0 pushed, 0 deleted (0 remote images indexed).',
+    );
+    expect(plugin.lastSyncError).toBeNull();
 
-    // Trigger failure notice and ensure isSyncing resets before subsequent sync
+    // Trigger failure notice with underlying cause and ensure persistent timeout: 0 + console.error
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     requestUrlBox.fn = async () => {
-      throw new Error('Network down');
+      throw new Error('ENOTFOUND gitlab.example.com');
     };
     await plugin.syncWithNotice();
-    expect(notices[2].message).toContain('GitLab sync failed:');
-    expect(notices[2].message).toContain('Network down');
+    const failNotice = notices[notices.length - 1];
+    expect(failNotice.timeout).toBe(0);
+    expect(failNotice.message).toContain('GitLab sync failed:');
+    expect(failNotice.message).toContain('ENOTFOUND gitlab.example.com');
+    expect(failNotice.message).toContain('click to dismiss');
+    expect(plugin.lastSyncError).toContain('ENOTFOUND gitlab.example.com');
+    expect(errSpy).toHaveBeenCalled();
 
     requestUrlBox.fn = server.requestFn;
     await plugin.syncWithNotice();
-    expect(notices[3].message).toContain('GitLab sync complete:');
+    expect(notices[notices.length - 1].message).toContain('GitLab sync complete:');
+    expect(plugin.lastSyncError).toBeNull();
 
     // Trigger conflict sync: modify both local and remote
     harness.files.set('note.md', 'local edit');
@@ -416,8 +461,9 @@ describe('GitLabOnDemandSyncPlugin', () => {
       { action: 'update', file_path: 'note.md', content: 'remote edit', encoding: 'text' },
     ]);
     await plugin.syncWithNotice();
-    expect(notices[4].message).toContain('GitLab sync conflict!');
-    expect(notices[4].message).toContain(`mobile-conflict/`);
+    const conflictNotice = notices[notices.length - 1];
+    expect(conflictNotice.message).toContain('GitLab sync conflict!');
+    expect(conflictNotice.message).toContain('mobile-conflict/');
     expect(plugin.syncState.lastSyncedCommitSha).toBe(baseSha);
 
     for (const notice of notices) {
