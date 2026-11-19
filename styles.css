@@ -87,3 +87,37 @@
   color: var(--text-error);
   word-break: break-word;
 }
+
+.gitlab-cleanup-modal-controls {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+
+.gitlab-cleanup-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background-color: var(--background-secondary);
+}
+
+.gitlab-cleanup-modal-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  word-break: break-all;
+}
+
+.gitlab-cleanup-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

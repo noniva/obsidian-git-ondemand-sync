@@ -376,6 +376,44 @@ export class TFile extends TAbstractFile {
 
 export class TFolder extends TAbstractFile {}
 
+export class App {}
+
+export class Modal {
+  app: App;
+  contentEl: HTMLElement & { empty: () => void };
+  modalEl: HTMLElement;
+  titleEl: HTMLElement;
+
+  constructor(app: App) {
+    this.app = app;
+    if (typeof document !== 'undefined') {
+      const content = document.createElement('div') as HTMLElement & { empty: () => void };
+      content.empty = () => {
+        content.replaceChildren();
+      };
+      this.contentEl = content;
+      this.modalEl = document.createElement('div');
+      this.titleEl = document.createElement('div');
+    } else {
+      this.contentEl = { empty: () => {} } as unknown as HTMLElement & { empty: () => void };
+      this.modalEl = {} as HTMLElement;
+      this.titleEl = {} as HTMLElement;
+    }
+  }
+
+  open(): void {
+    this.onOpen();
+  }
+
+  close(): void {
+    this.onClose();
+  }
+
+  onOpen(): void {}
+
+  onClose(): void {}
+}
+
 export class MarkdownView {
   editor: unknown = null;
 }
