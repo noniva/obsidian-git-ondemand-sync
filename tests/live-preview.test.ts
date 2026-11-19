@@ -280,4 +280,41 @@ describe('createLivePreviewImageExtension', () => {
     view.destroy();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:lp-1');
   });
+
+  it('hydrates built-in .internal-embed nodes injected into Live Preview DOM and cleans up on destroy', async () => {
+    const cleanup = vi.fn();
+    const observeAndLoad = vi.fn().mockReturnValue(cleanup);
+    const ctx: ImageRenderContext = {
+      settings: { ...DEFAULT_SETTINGS },
+      state: {
+        lastSyncedCommitSha: 'c1',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: ['Asset/builtin.png'],
+      },
+      loader: { observeAndLoad } as unknown as OnDemandImageLoader,
+      isLocalFilePresent: () => false,
+      isEnabled: () => true,
+    };
+
+    const view = mountEditor('Intro', () => ctx, { cursor: 0 });
+    const builtInEmbed = document.createElement('div');
+    builtInEmbed.className = 'internal-embed image-embed is-unresolved';
+    builtInEmbed.setAttribute('src', 'builtin.png');
+    view.contentDOM.appendChild(builtInEmbed);
+
+    await vi.waitFor(() => expect(observeAndLoad).toHaveBeenCalledTimes(1));
+    expect(builtInEmbed.classList.contains('is-unresolved')).toBe(false);
+    expect(builtInEmbed.classList.contains('gitlab-ondemand-embed')).toBe(true);
+    expect(builtInEmbed.querySelector('img')).not.toBeNull();
+    expect(observeAndLoad).toHaveBeenCalledWith(
+      expect.any(HTMLImageElement),
+      'Asset/builtin.png',
+      'main',
+      undefined,
+    );
+
+    view.destroy();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
 });

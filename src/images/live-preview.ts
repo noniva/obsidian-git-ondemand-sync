@@ -9,8 +9,13 @@ import {
   WidgetType,
 } from '@codemirror/view';
 import { editorInfoField, editorLivePreviewField } from 'obsidian';
-import type { ImageRenderContext } from './reading-view';
-import { isImagePath, normalizeVaultPath, parseImageEmbed, resolveRemoteImagePath } from '../utils/paths';
+import {
+  getActiveRefs,
+  getNoteDir,
+  hydrateRemoteEmbed,
+  type ImageRenderContext,
+} from './reading-view';
+import { isImagePath, parseImageEmbed, resolveRemoteImagePath } from '../utils/paths';
 
 /**
  * CodeMirror state effect dispatched when open Live Preview editors should rebuild
@@ -35,20 +40,6 @@ const CODE_NODE_NAMES = [
 ];
 
 const widgetCleanups = new WeakMap<HTMLElement, () => void>();
-
-function getNoteDir(sourcePath: string): string {
-  const normalized = normalizeVaultPath(sourcePath);
-  const lastSlash = normalized.lastIndexOf('/');
-  return lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
-}
-
-function getActiveRefs(ctx: ImageRenderContext): { ref: string; fallbackRef?: string } {
-  const targetBranch = ctx.settings.branch || 'main';
-  if (ctx.state.activeConflictBranch) {
-    return { ref: ctx.state.activeConflictBranch, fallbackRef: targetBranch };
-  }
-  return { ref: targetBranch };
-}
 
 function parseMarkdownAlt(rawAlt: string): { alt: string; width?: number } {
   const trimmed = rawAlt.trim();
@@ -251,9 +242,19 @@ export function createLivePreviewImageExtension(getContext: () => ImageRenderCon
     ViewPlugin.fromClass(
       class {
         decorations: DecorationSet;
+        private readonly view: EditorView;
+        private readonly domEmbedCleanups = new Map<HTMLElement, () => void>();
+        private readonly observer: MutationObserver | null;
 
         constructor(view: EditorView) {
+          this.view = view;
           this.decorations = buildDecorations(view, getContext);
+          this.observer =
+            typeof MutationObserver === 'function'
+              ? new MutationObserver(() => this.syncBuiltInEmbeds())
+              : null;
+          this.observer?.observe(view.contentDOM, { childList: true, subtree: true });
+          this.syncBuiltInEmbeds();
         }
 
         update(update: ViewUpdate): void {
@@ -272,6 +273,45 @@ export function createLivePreviewImageExtension(getContext: () => ImageRenderCon
             refreshRequested
           ) {
             this.decorations = buildDecorations(update.view, getContext);
+            this.syncBuiltInEmbeds();
+          }
+        }
+
+        destroy(): void {
+          this.observer?.disconnect();
+          this.clearDomEmbedCleanups();
+        }
+
+        private clearDomEmbedCleanups(): void {
+          for (const cleanup of this.domEmbedCleanups.values()) {
+            cleanup();
+          }
+          this.domEmbedCleanups.clear();
+        }
+
+        private syncBuiltInEmbeds(): void {
+          for (const [el, cleanup] of Array.from(this.domEmbedCleanups.entries())) {
+            if (!el.isConnected) {
+              cleanup();
+              this.domEmbedCleanups.delete(el);
+            }
+          }
+
+          const ctx = getContext();
+          if (!ctx.isEnabled() || this.view.state.field(editorLivePreviewField, false) === false) {
+            this.clearDomEmbedCleanups();
+            return;
+          }
+
+          const fileInfo = this.view.state.field(editorInfoField, false);
+          const noteDir = getNoteDir(fileInfo?.file?.path ?? '');
+
+          const embeds = this.view.contentDOM.querySelectorAll<HTMLElement>('.internal-embed');
+          for (const embedEl of Array.from(embeds)) {
+            const cleanup = hydrateRemoteEmbed(embedEl, noteDir, ctx);
+            if (cleanup) {
+              this.domEmbedCleanups.set(embedEl, cleanup);
+            }
           }
         }
       },

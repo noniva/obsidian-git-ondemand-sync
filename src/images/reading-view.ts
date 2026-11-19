@@ -30,18 +30,65 @@ class GitLabImageRenderChild extends MarkdownRenderChild {
   }
 }
 
-function getNoteDir(sourcePath: string): string {
+export function getNoteDir(sourcePath: string): string {
   const normalized = normalizeVaultPath(sourcePath);
   const lastSlash = normalized.lastIndexOf('/');
   return lastSlash >= 0 ? normalized.slice(0, lastSlash) : '';
 }
 
-function getActiveRefs(ctx: ImageRenderContext): { ref: string; fallbackRef?: string } {
+export function getActiveRefs(ctx: ImageRenderContext): { ref: string; fallbackRef?: string } {
   const targetBranch = ctx.settings.branch || 'main';
   if (ctx.state.activeConflictBranch) {
     return { ref: ctx.state.activeConflictBranch, fallbackRef: targetBranch };
   }
   return { ref: targetBranch };
+}
+
+/**
+ * Replaces an unresolved Obsidian `.internal-embed` element with an on-demand lazy-loaded `<img>`.
+ * Returns a cleanup callback if hydrated, or `null` if skipped.
+ */
+export function hydrateRemoteEmbed(
+  embedEl: HTMLElement,
+  noteDir: string,
+  ctx: ImageRenderContext,
+): (() => void) | null {
+  if (embedEl.dataset.gitlabProcessed === 'true') {
+    return null;
+  }
+
+  const rawTarget = embedEl.getAttribute('src') ?? embedEl.getAttribute('data-src') ?? '';
+  const parsed = parseImageEmbed(rawTarget);
+  if (!parsed || !isImagePath(parsed.target)) {
+    return null;
+  }
+
+  const resolved = resolveRemoteImagePath(
+    parsed.target,
+    noteDir,
+    ctx.state.remoteImagePaths,
+    { decodeTarget: false },
+  );
+  if (!resolved || ctx.isLocalFilePresent(resolved)) {
+    return null;
+  }
+
+  const { ref, fallbackRef } = getActiveRefs(ctx);
+  const altAttr = embedEl.getAttribute('alt') ?? '';
+  const width =
+    parsed.width ??
+    parseWidthAttr(embedEl.getAttribute('width')) ??
+    parseWidthAttr(altAttr);
+
+  const imgEl = document.createElement('img');
+  applyImageAttributes(imgEl, parsed.alt ?? altAttr, width);
+
+  embedEl.dataset.gitlabProcessed = 'true';
+  embedEl.classList.remove('is-unresolved');
+  embedEl.classList.add('is-loaded', 'gitlab-ondemand-embed');
+  embedEl.replaceChildren(imgEl);
+
+  return ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
 }
 
 function parseWidthAttr(raw: string | null): number | undefined {
@@ -92,42 +139,10 @@ export function registerReadingViewImageProcessor(
     }
     embeds.push(...Array.from(el.querySelectorAll<HTMLElement>('.internal-embed')));
     for (const embedEl of embeds) {
-      if (embedEl.dataset.gitlabProcessed === 'true') {
-        continue;
+      const cleanup = hydrateRemoteEmbed(embedEl, noteDir, ctx);
+      if (cleanup) {
+        mdCtx.addChild(new GitLabImageRenderChild(embedEl, cleanup));
       }
-
-      const rawTarget = embedEl.getAttribute('src') ?? embedEl.getAttribute('data-src') ?? '';
-      const parsed = parseImageEmbed(rawTarget);
-      if (!parsed || !isImagePath(parsed.target)) {
-        continue;
-      }
-
-      const resolved = resolveRemoteImagePath(
-        parsed.target,
-        noteDir,
-        ctx.state.remoteImagePaths,
-        { decodeTarget: false },
-      );
-      if (!resolved || ctx.isLocalFilePresent(resolved)) {
-        continue;
-      }
-
-      const altAttr = embedEl.getAttribute('alt') ?? '';
-      const width =
-        parsed.width ??
-        parseWidthAttr(embedEl.getAttribute('width')) ??
-        parseWidthAttr(altAttr);
-
-      const imgEl = document.createElement('img');
-      applyImageAttributes(imgEl, parsed.alt ?? altAttr, width);
-
-      embedEl.dataset.gitlabProcessed = 'true';
-      embedEl.classList.remove('is-unresolved');
-      embedEl.classList.add('is-loaded', 'gitlab-ondemand-embed');
-      embedEl.replaceChildren(imgEl);
-
-      const cleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
-      mdCtx.addChild(new GitLabImageRenderChild(embedEl, cleanup));
     }
 
     const images: HTMLImageElement[] = [];
