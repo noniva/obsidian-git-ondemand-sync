@@ -115,7 +115,7 @@ export function applyImageWidth(imgEl: HTMLImageElement, width?: number): void {
     const withCssProps = imgEl as HTMLImageElement & {
       setCssProps?: (props: Record<string, string>) => void;
     };
-    withCssProps.setCssProps?.({ width: `${width}px`, 'max-width': '100%' });
+    withCssProps.setCssProps?.({ width: `${width}px` });
   }
 }
 
