@@ -8,9 +8,12 @@ import { FakeGitLabServer } from '../helpers/fake-gitlab';
 
 function createMemoryVault(initial: Record<string, string> = {}) {
   const files: Record<string, string> = { ...initial };
-  const writeBinary = vi.fn();
 
-  const vault: VaultTextAdapter = {
+  // VaultTextAdapter omits writeBinary by design; full Plugin.app.vault.adapter wiring is tested in Task 6.
+  const vault: VaultTextAdapter & {
+    writeText: ReturnType<typeof vi.fn>;
+    writeBinary: ReturnType<typeof vi.fn>;
+  } = {
     listTextFiles: async () => Object.keys(files).sort(),
     readText: async (path: string) => {
       if (!(path in files)) {
@@ -18,15 +21,16 @@ function createMemoryVault(initial: Record<string, string> = {}) {
       }
       return files[path];
     },
-    writeText: async (path: string, content: string) => {
+    writeText: vi.fn(async (path: string, content: string) => {
       files[path] = content;
-    },
+    }),
+    writeBinary: vi.fn(),
     deleteFile: async (path: string) => {
       delete files[path];
     },
   };
 
-  return { vault, files, writeBinary };
+  return { vault, files };
 }
 
 function createMemoryBlobApi(): {
@@ -70,14 +74,13 @@ function createMockImg(): HTMLImageElement {
   } as unknown as HTMLImageElement;
 }
 
-function createTestSettings(overrides: Partial<PluginSettings> = {}): PluginSettings {
+function createTestSettings(): PluginSettings {
   return {
     ...DEFAULT_SETTINGS,
     gitlabUrl: 'https://gitlab.example.com',
     projectId: 'user/obsidian-vault',
     branch: 'main',
     token: 'glpat-mobile-test',
-    ...overrides,
   };
 }
 
@@ -90,7 +93,6 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     const server = new FakeGitLabServer({
       pageSize: 2,
       expectedToken: 'glpat-mobile-test',
-      expectedProjectId: 'user/obsidian-vault',
     });
     const logoBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
     const baseCommitSha = server.seedBranch('main', {
@@ -104,7 +106,7 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       { baseUrl: settings.gitlabUrl, projectId: settings.projectId, token: settings.token },
       server.requestFn,
     );
-    const { vault, files, writeBinary } = createMemoryVault();
+    const { vault, files } = createMemoryVault();
     const state: SyncState = {
       lastSyncedCommitSha: null,
       activeConflictBranch: null,
@@ -136,7 +138,11 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     });
     expect(state.remoteImagePaths).toEqual(['attachments/logo.png']);
     expect(state.lastSyncedCommitSha).toBe(baseCommitSha);
-    expect(writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeText).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\.(png|jpg|webp|heic)$/i),
+      expect.anything(),
+    );
 
     // 2. Desktop edits notes/doc.md on main; Mobile diverges on doc.md and creates 3 local notes
     server.commitOnBranch('main', 'Desktop edit', [
@@ -232,6 +238,7 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     expect(state.conflictPushedHashes).toBeUndefined();
     expect(state.conflictDeletedPaths).toBeUndefined();
     expect(state.lastSyncedCommitSha).toBe(mergeSha);
+    expect(state.remoteImagePaths).toEqual(['attachments/logo.png', pasteRes.repoPath]);
 
     // 8. Subsequent sync pushes post-push edits cleanly with zero conflict loop, then converges to no-op
     const postClearRes = await engine.sync();
@@ -239,6 +246,7 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     expect(postClearRes.pulled).toBe(0);
     expect(postClearRes.deletedLocal).toBe(0);
     expect(postClearRes.pushed).toBe(2);
+    expect(state.remoteImagePaths).toEqual([pasteRes.repoPath, 'attachments/logo.png']);
 
     const mainFinal = server.getBranchFiles('main');
     expect(decodeText(mainFinal['notes/later.md'])).toBe('written after conflict push');
@@ -255,7 +263,11 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       conflictBranch: null,
       headCommitSha: postClearRes.headCommitSha,
     });
-    expect(writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeText).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\.(png|jpg|webp|heic)$/i),
+      expect.anything(),
+    );
   });
 
   it('recovers cleanly from mid-incremental-pull raw failure and guards against concurrent Desktop pushes (TOCTOU + onBeforeCommit)', async () => {
@@ -265,9 +277,10 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     const c0 = server.seedBranch('main', {
       'notes/base.md': 'base v1',
     });
+    let requestDelegate: RequestUrlFn = server.requestFn;
     const client = new GitLabClient(
       { baseUrl: settings.gitlabUrl, projectId: settings.projectId, token: settings.token },
-      server.requestFn,
+      (req) => requestDelegate(req),
     );
     const { vault, files } = createMemoryVault();
     const state: SyncState = {
@@ -276,12 +289,13 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       files: {},
       remoteImagePaths: [],
     };
+    const saveState = vi.fn();
     const engine = new SyncEngine({
       settings,
       state,
       client,
       vault,
-      saveState: vi.fn(),
+      saveState,
       now: () => new Date('2026-11-19T06:20:00Z'),
     });
 
@@ -294,13 +308,17 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       { action: 'create', file_path: 'notes/inc-b.md', content: 'inc B', encoding: 'text' },
     ]);
 
+    saveState.mockClear();
     server.failNextRawFetch('notes/inc-b.md');
     await expect(engine.sync()).rejects.toThrow(/500/);
+    expect(saveState).not.toHaveBeenCalled();
     expect(files).toEqual({ 'notes/base.md': 'base v1' });
     expect(state.files['notes/inc-a.md']).toBeUndefined();
     expect(state.lastSyncedCommitSha).toBe(c0);
 
     const retryRes = await engine.sync();
+    // applyPulls persists pulled files before pushes, then sync() persists final head state.
+    expect(saveState).toHaveBeenCalledTimes(2);
     expect(retryRes.pulled).toBe(3);
     expect(retryRes.conflictBranch).toBeNull();
     expect(files).toEqual({
@@ -313,7 +331,8 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     // Part B: Concurrent Desktop commit right before TOCTOU getBranchHead check aborts cleanly without overwriting Desktop
     files['notes/base.md'] = 'mobile edit';
     let branchChecks = 0;
-    const toctouRequestFn: RequestUrlFn = async (req) => {
+    saveState.mockClear();
+    requestDelegate = async (req) => {
       if ((req.method ?? 'GET').toUpperCase() === 'GET' && req.url.includes('/repository/branches/main')) {
         branchChecks++;
         if (branchChecks === 2) {
@@ -329,20 +348,13 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       }
       return server.requestFn(req);
     };
-    const toctouClient = new GitLabClient(
-      { baseUrl: settings.gitlabUrl, projectId: settings.projectId, token: settings.token },
-      toctouRequestFn,
-    );
-    const toctouEngine = new SyncEngine({
-      settings,
-      state,
-      client: toctouClient,
-      vault,
-      saveState: vi.fn(),
-      now: () => new Date('2026-11-19T06:21:00Z'),
-    });
 
-    await expect(toctouEngine.sync()).rejects.toThrow(/target branch moved/i);
+    try {
+      await expect(engine.sync()).rejects.toThrow(/target branch moved/i);
+    } finally {
+      requestDelegate = server.requestFn;
+    }
+    expect(saveState).not.toHaveBeenCalled();
     expect(decodeText(server.getBranchFiles('main')['notes/base.md'])).toBe(
       'desktop concurrent update',
     );
@@ -350,6 +362,7 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     expect(files['notes/base.md']).toBe('mobile edit');
 
     const conflictAfterToctou = await engine.sync();
+    expect(saveState).toHaveBeenCalledTimes(1);
     expect(conflictAfterToctou.conflictBranch).toBe('mobile-conflict/20261119-062000');
     expect(decodeText(server.getBranchFiles('main')['notes/base.md'])).toBe(
       'desktop concurrent update',
@@ -373,16 +386,18 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       files: {},
       remoteImagePaths: [],
     };
+    const raceSaveState = vi.fn();
     const raceEngine = new SyncEngine({
       settings,
       state: raceState,
       client: raceClient,
       vault: raceVault.vault,
-      saveState: vi.fn(),
+      saveState: raceSaveState,
       now: () => new Date('2026-11-19T06:22:00Z'),
     });
     await raceEngine.sync();
 
+    raceSaveState.mockClear();
     raceVault.files['notes/race.md'] = 'mobile raced create';
     raceServer.onBeforeCommit(() => {
       raceServer.onBeforeCommit(null);
@@ -397,12 +412,14 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     });
 
     await expect(raceEngine.sync()).rejects.toThrow(/400.*already exists/i);
+    expect(raceSaveState).not.toHaveBeenCalled();
     expect(decodeText(raceServer.getBranchFiles('main')['notes/race.md'])).toBe(
       'desktop raced create',
     );
     expect(raceState.lastSyncedCommitSha).toBe(r0);
 
     const raceConflict = await raceEngine.sync();
+    expect(raceSaveState).toHaveBeenCalledTimes(1);
     expect(raceConflict.conflictBranch).toBe('mobile-conflict/20261119-062200');
     expect(decodeText(raceServer.getBranchFiles('main')['notes/race.md'])).toBe(
       'desktop raced create',
@@ -442,7 +459,7 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       { baseUrl: settings.gitlabUrl, projectId: settings.projectId, token: settings.token },
       server.requestFn,
     );
-    const { vault, files, writeBinary } = createMemoryVault();
+    const { vault, files } = createMemoryVault();
     const state: SyncState = {
       lastSyncedCommitSha: null,
       activeConflictBranch: null,
@@ -526,7 +543,11 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     expect(reloadedPastedBlob.type).toBe('image/png');
     expect(new Uint8Array(await reloadedPastedBlob.arrayBuffer())).toEqual(pastedBytes);
 
-    expect(writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeBinary).not.toHaveBeenCalled();
+    expect(vault.writeText).not.toHaveBeenCalledWith(
+      expect.stringMatching(/\.(png|jpg|webp|heic)$/i),
+      expect.anything(),
+    );
     expect(Object.keys(files).sort()).toEqual(['notes/gallery.md', 'notes/one.md', 'notes/two.md']);
   });
 });

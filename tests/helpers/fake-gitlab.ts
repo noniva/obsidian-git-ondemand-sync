@@ -5,19 +5,10 @@ import type { GitLabCommitAction, GitLabTreeEntry } from '../../src/types';
 export interface FakeGitLabServerOptions {
   pageSize?: number;
   expectedToken?: string;
-  expectedProjectId?: string;
 }
 
 export interface MergeBranchOptions {
   resolvedFiles?: Record<string, string | Uint8Array | ArrayBuffer | null>;
-  message?: string;
-}
-
-export interface RawFetchFailureOptions {
-  path?: string;
-  after?: number;
-  status?: number;
-  message?: string;
 }
 
 export interface BeforeCommitInfo {
@@ -37,15 +28,7 @@ interface StoredBlob {
 interface CommitRecord {
   id: string;
   parentIds: string[];
-  message: string;
   files: Map<string, StoredBlob>;
-}
-
-interface PendingRawFailure {
-  path?: string;
-  remainingSkips: number;
-  status: number;
-  message: string;
 }
 
 class GitLabHttpError extends Error {
@@ -116,18 +99,14 @@ function jsonResponse(
   };
 }
 
-function rawResponse(
-  status: number,
-  bytes: Uint8Array,
-  headers: Record<string, string> = {},
-): RequestUrlResponse {
+function rawResponse(status: number, bytes: Uint8Array): RequestUrlResponse {
   const copy = new Uint8Array(bytes);
   return {
     status,
     text: new TextDecoder().decode(copy),
     arrayBuffer: copy.buffer,
     json: null,
-    headers,
+    headers: {},
   };
 }
 
@@ -142,17 +121,15 @@ function baseNameOf(repoPath: string): string {
 export class FakeGitLabServer {
   private readonly pageSize?: number;
   private readonly expectedToken?: string;
-  private readonly expectedProjectId?: string;
   private readonly branches = new Map<string, string>();
   private readonly commits = new Map<string, CommitRecord>();
   private commitSeq = 0;
-  private pendingRawFailure: PendingRawFailure | null = null;
+  private pendingRawFailurePath: string | null | undefined = undefined;
   private beforeCommitHook: BeforeCommitHook | null = null;
 
   constructor(options: FakeGitLabServerOptions = {}) {
     this.pageSize = options.pageSize;
     this.expectedToken = options.expectedToken;
-    this.expectedProjectId = options.expectedProjectId;
   }
 
   readonly requestFn: RequestUrlFn = async (req) => {
@@ -163,17 +140,12 @@ export class FakeGitLabServer {
       }
 
       const url = new URL(req.url);
-      const match = /^\/api\/v4\/projects\/([^/]+)\/repository\/(.*)$/.exec(url.pathname);
+      const match = /^\/api\/v4\/projects\/[^/]+\/repository\/(.*)$/.exec(url.pathname);
       if (!match) {
         return jsonResponse(404, { message: '404 Not Found' });
       }
 
-      const projectId = decodeURIComponent(match[1]);
-      if (this.expectedProjectId !== undefined && projectId !== this.expectedProjectId) {
-        return jsonResponse(404, { message: '404 Project Not Found' });
-      }
-
-      const repoPath = match[2];
+      const repoPath = match[1];
       const method = (req.method ?? 'GET').toUpperCase();
 
       if (method === 'GET') {
@@ -220,9 +192,8 @@ export class FakeGitLabServer {
         const rawMatch = /^files\/(.+)\/raw$/.exec(repoPath);
         if (rawMatch) {
           const filePath = normalizeRepoPath(decodeURIComponent(rawMatch[1]));
-          const injectedFailure = this.consumeRawFailure(filePath);
-          if (injectedFailure) {
-            return jsonResponse(injectedFailure.status, { message: injectedFailure.message });
+          if (this.consumeRawFailure(filePath)) {
+            return jsonResponse(500, { message: 'Injected raw fetch failure' });
           }
 
           const ref = url.searchParams.get('ref') ?? '';
@@ -278,7 +249,6 @@ export class FakeGitLabServer {
   seedBranch(
     branch: string,
     files: Record<string, string | Uint8Array | ArrayBuffer>,
-    message = 'Initial commit',
   ): string {
     if (this.branches.has(branch)) {
       throw new Error(`Branch "${branch}" already exists`);
@@ -287,7 +257,7 @@ export class FakeGitLabServer {
     for (const [rawPath, content] of Object.entries(files)) {
       storedFiles.set(normalizeRepoPath(rawPath), makeBlob(toBytes(content)));
     }
-    const commitId = this.recordCommit([], message, storedFiles);
+    const commitId = this.recordCommit([], 'Initial commit', storedFiles);
     this.branches.set(branch, commitId);
     return commitId;
   }
@@ -431,9 +401,11 @@ export class FakeGitLabServer {
       }
     }
 
-    const message =
-      options.message ?? `Merge branch '${sourceBranch}' into '${targetBranch}'`;
-    const mergeCommitId = this.recordCommit([targetHead, sourceHead], message, mergedFiles);
+    const mergeCommitId = this.recordCommit(
+      [targetHead, sourceHead],
+      `Merge branch '${sourceBranch}' into '${targetBranch}'`,
+      mergedFiles,
+    );
     this.branches.set(targetBranch, mergeCommitId);
     return mergeCommitId;
   }
@@ -444,14 +416,8 @@ export class FakeGitLabServer {
     }
   }
 
-  failNextRawFetch(options: string | RawFetchFailureOptions = {}): void {
-    const opts: RawFetchFailureOptions = typeof options === 'string' ? { path: options } : options;
-    this.pendingRawFailure = {
-      path: opts.path ? normalizeRepoPath(opts.path) : undefined,
-      remainingSkips: opts.after ?? 0,
-      status: opts.status ?? 500,
-      message: opts.message ?? 'Injected raw fetch failure',
-    };
+  failNextRawFetch(path?: string): void {
+    this.pendingRawFailurePath = path ? normalizeRepoPath(path) : null;
   }
 
   onBeforeCommit(hook: BeforeCommitHook | null): void {
@@ -479,20 +445,15 @@ export class FakeGitLabServer {
     return this.commits.get(ref);
   }
 
-  private consumeRawFailure(filePath: string): PendingRawFailure | null {
-    const failure = this.pendingRawFailure;
-    if (!failure) {
-      return null;
+  private consumeRawFailure(filePath: string): boolean {
+    if (this.pendingRawFailurePath === undefined) {
+      return false;
     }
-    if (failure.path && failure.path !== filePath) {
-      return null;
+    if (this.pendingRawFailurePath !== null && this.pendingRawFailurePath !== filePath) {
+      return false;
     }
-    if (failure.remainingSkips > 0) {
-      failure.remainingSkips--;
-      return null;
-    }
-    this.pendingRawFailure = null;
-    return failure;
+    this.pendingRawFailurePath = undefined;
+    return true;
   }
 
   private findLowestCommonAncestor(commitA: string, commitB: string): CommitRecord | undefined {
@@ -543,7 +504,7 @@ export class FakeGitLabServer {
       hash.update(`${path}:${blob.id}\n`);
     }
     const id = hash.digest('hex');
-    this.commits.set(id, { id, parentIds, message, files });
+    this.commits.set(id, { id, parentIds, files });
     return id;
   }
 }
