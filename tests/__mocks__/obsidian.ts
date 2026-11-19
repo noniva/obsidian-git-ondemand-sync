@@ -337,6 +337,12 @@ export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
 }
 
+export function setIcon(parent: HTMLElement, iconId: string): void {
+  if (parent?.dataset) {
+    parent.dataset.icon = iconId;
+  }
+}
+
 export async function requestUrl(_request: unknown): Promise<{
   status: number;
   text: string;

@@ -278,6 +278,8 @@ describe('createLivePreviewImageExtension', () => {
     await vi.waitFor(() => expect(imgEl.src).toBe('blob:lp-1'));
 
     view.destroy();
+    expect(blobApi.revokeObjectURL).not.toHaveBeenCalled();
+    loader.revokeAll();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:lp-1');
   });
 

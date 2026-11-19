@@ -224,6 +224,8 @@ describe('registerReadingViewImageProcessor', () => {
     await vi.waitFor(() => expect(imgEl.src).toBe('blob:rv-1'));
 
     children[0].onunload();
+    expect(blobApi.revokeObjectURL).not.toHaveBeenCalled();
+    loader.revokeAll();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:rv-1');
   });
 

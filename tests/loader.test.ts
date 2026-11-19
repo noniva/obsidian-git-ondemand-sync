@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { OnDemandImageLoader } from '../src/images/loader';
 
@@ -17,7 +18,7 @@ describe('OnDemandImageLoader', () => {
     vi.unstubAllGlobals();
   });
 
-  it('fetches image bytes, creates blob URL, and revokes on cleanup', async () => {
+  it('fetches image bytes, creates blob URL, caches in Tier 1 across cleanup, and revokes on revokeAll', async () => {
     const client = { getRawBinary: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]).buffer) } as any;
     const blobApi = {
       createObjectURL: vi.fn().mockReturnValue('blob:mock-1'),
@@ -33,6 +34,9 @@ describe('OnDemandImageLoader', () => {
     expect(createdBlob.type).toBe('image/png');
 
     cleanup();
+    expect(blobApi.revokeObjectURL).not.toHaveBeenCalled();
+
+    loader.revokeAll();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:mock-1');
   });
 
@@ -194,6 +198,8 @@ describe('OnDemandImageLoader', () => {
     await vi.waitFor(() => expect(imgEl.src).toBe('blob:observed'));
 
     cleanup();
+    expect(blobApi.revokeObjectURL).not.toHaveBeenCalled();
+    loader.revokeAll();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:observed');
   });
 
@@ -405,5 +411,208 @@ describe('OnDemandImageLoader', () => {
 
     cleanup();
     expect(imgEl.classList.remove).toHaveBeenCalledWith('gitlab-img-loading');
+  });
+
+  it('caches remote-fetched images in Tier 1 LRU, supports fallbackRef hit, and re-fetches on ref mismatch', async () => {
+    let seq = 0;
+    const blobApi = {
+      createObjectURL: vi.fn(() => `blob:tier1-${++seq}`),
+      revokeObjectURL: vi.fn(),
+    };
+    const client = {
+      getRawBinary: vi
+        .fn()
+        .mockResolvedValueOnce(new Uint8Array([1]).buffer)
+        .mockResolvedValueOnce(new Uint8Array([2]).buffer)
+        .mockResolvedValueOnce(new Uint8Array([3]).buffer),
+    } as any;
+
+    const loader = new OnDemandImageLoader(client, blobApi, 3, 2);
+
+    const img1 = createMockImg();
+    const cleanup1 = loader.loadIntoElement(img1, 'attachments/a.png', 'main');
+    await vi.waitFor(() => expect(img1.src).toBe('blob:tier1-1'));
+    cleanup1();
+
+    // Same path & ref hits Tier 1 immediately without network call
+    const img1Again = createMockImg();
+    loader.loadIntoElement(img1Again, 'attachments/a.png', 'main');
+    expect(img1Again.src).toBe('blob:tier1-1');
+    expect(client.getRawBinary).toHaveBeenCalledTimes(1);
+
+    // Matching fallbackRef also hits Tier 1
+    const img1Fallback = createMockImg();
+    loader.loadIntoElement(img1Fallback, 'attachments/a.png', 'conflict-branch', 'main');
+    expect(img1Fallback.src).toBe('blob:tier1-1');
+    expect(client.getRawBinary).toHaveBeenCalledTimes(1);
+
+    // Different ref misses Tier 1, fetches new ref, and revokes old ref URL
+    const img1Feature = createMockImg();
+    loader.loadIntoElement(img1Feature, 'attachments/a.png', 'feature');
+    await vi.waitFor(() => expect(img1Feature.src).toBe('blob:tier1-2'));
+    expect(client.getRawBinary).toHaveBeenCalledTimes(2);
+    expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:tier1-1');
+
+    // Fill maxMemoryImages=2 and verify LRU eviction on remote fetch
+    const img2 = createMockImg();
+    loader.loadIntoElement(img2, 'attachments/b.png', 'main');
+    await vi.waitFor(() => expect(img2.src).toBe('blob:tier1-3'));
+
+    // Touch a.png so b.png becomes LRU, then fetch c.png
+    loader.loadIntoElement(createMockImg(), 'attachments/a.png', 'feature');
+    (client.getRawBinary as any).mockResolvedValueOnce(new Uint8Array([4]).buffer);
+    const img3 = createMockImg();
+    loader.loadIntoElement(img3, 'attachments/c.png', 'main');
+    await vi.waitFor(() => expect(img3.src).toBe('blob:tier1-4'));
+    expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:tier1-3');
+  });
+
+  it('uses Tier 2 persistent cache on hit, evicts oldest entries by byte limit, handles errors, and clears on clearCache()', async () => {
+    const store = new Map<string, Response>();
+    const mockCache = {
+      match: vi.fn(async (key: string) => {
+        const hit = store.get(key);
+        return hit ? hit.clone() : undefined;
+      }),
+      put: vi.fn(async (key: string, res: Response) => {
+        store.set(key, res.clone());
+      }),
+      keys: vi.fn(async () => Array.from(store.keys())),
+      delete: vi.fn(async (key: string) => store.delete(key)),
+    };
+    const mockCaches = {
+      open: vi.fn(async () => mockCache),
+      delete: vi.fn(async () => {
+        store.clear();
+        return true;
+      }),
+    };
+    vi.stubGlobal('caches', mockCaches);
+
+    let seq = 0;
+    const blobApi = {
+      createObjectURL: vi.fn(() => `blob:tier2-${++seq}`),
+      revokeObjectURL: vi.fn(),
+    };
+    const client = {
+      getRawBinary: vi
+        .fn()
+        .mockResolvedValueOnce(new Uint8Array(60).buffer)
+        .mockResolvedValueOnce(new Uint8Array(60).buffer),
+    } as any;
+
+    const loader = new OnDemandImageLoader(client, blobApi, 3, 10, {
+      isPersistentCacheEnabled: () => true,
+      getMaxCacheBytes: () => 100,
+    });
+
+    // 1. Seed Tier 2 directly for cached.png and verify Tier 2 hit promotes to Tier 1 without network fetch
+    const cachedKey = 'https://git-ondemand-sync.local/img?ref=main&path=attachments%2Fcached.png';
+    store.set(
+      cachedKey,
+      new Response(new Uint8Array([10, 20, 30]).buffer, {
+        headers: {
+          'Content-Type': 'image/png',
+          'X-Cached-At': '1000',
+          'X-Byte-Length': '3',
+        },
+      }),
+    );
+
+    const cachedImg = createMockImg();
+    loader.loadIntoElement(cachedImg, 'attachments/cached.png', 'main');
+    await vi.waitFor(() => expect(cachedImg.src).toBe('blob:tier2-1'));
+    expect(client.getRawBinary).not.toHaveBeenCalled();
+
+    // 2. Network fetch of 60 bytes + existing 3 bytes = 63 bytes (<= 100, keeps both)
+    const imgA = createMockImg();
+    loader.loadIntoElement(imgA, 'attachments/a.png', 'main');
+    await vi.waitFor(() => expect(imgA.src).toBe('blob:tier2-2'));
+    await vi.waitFor(() => expect(store.size).toBe(2));
+
+    // 3. Network fetch of another 60 bytes exceeds 100 bytes -> evicts oldest entry
+    const imgB = createMockImg();
+    loader.loadIntoElement(imgB, 'attachments/b.png', 'main');
+    await vi.waitFor(() => expect(imgB.src).toBe('blob:tier2-3'));
+    await vi.waitFor(() => expect(mockCache.delete).toHaveBeenCalled());
+
+    const remainingBytes = Array.from(store.values()).reduce(
+      (sum, res) => sum + Number(res.headers.get('X-Byte-Length') ?? 0),
+      0,
+    );
+    expect(remainingBytes).toBeLessThanOrEqual(100);
+
+    // 4. clearCache() revokes Tier 1 URLs and deletes persistent CacheStorage
+    await loader.clearCache();
+    expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:tier2-1');
+    expect(mockCaches.delete).toHaveBeenCalledWith('gitlab-ondemand-sync-images-v1');
+
+    // 5. Storage failure resilience: broken caches.open must not break network loading
+    vi.stubGlobal('caches', {
+      open: vi.fn().mockRejectedValue(new Error('QuotaExceededError')),
+    });
+    (client.getRawBinary as any).mockResolvedValueOnce(new Uint8Array([7, 8]).buffer);
+    const resilientImg = createMockImg();
+    loader.loadIntoElement(resilientImg, 'attachments/resilient.png', 'main');
+    await vi.waitFor(() => expect(resilientImg.src).toBe('blob:tier2-4'));
+  });
+
+  it('renders inline .gitlab-img-error-box with Reload button on failure, retries on click, and cleans up', async () => {
+    const container = document.createElement('div');
+    container.className = 'gitlab-ondemand-embed';
+    const imgEl = document.createElement('img');
+    imgEl.style.display = 'inline';
+    container.appendChild(imgEl);
+
+    let resolveRetry!: (buf: ArrayBuffer) => void;
+    const client = {
+      getRawBinary: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Network timeout'))
+        .mockImplementationOnce(
+          () =>
+            new Promise<ArrayBuffer>((resolve) => {
+              resolveRetry = resolve;
+            }),
+        )
+        .mockRejectedValueOnce(new Error('Still failing')),
+    } as any;
+    const blobApi = {
+      createObjectURL: vi.fn().mockReturnValue('blob:reloaded'),
+      revokeObjectURL: vi.fn(),
+    };
+
+    const loader = new OnDemandImageLoader(client, blobApi, 3);
+    const cleanup = loader.loadIntoElement(imgEl, 'attachments/flaky.png', 'main');
+
+    await vi.waitFor(() => expect(container.querySelector('.gitlab-img-error-box')).not.toBeNull());
+    expect(imgEl.style.display).toBe('none');
+    expect(imgEl.classList.contains('gitlab-img-error')).toBe(true);
+
+    const errorBox = container.querySelector('.gitlab-img-error-box')!;
+    expect(errorBox.textContent).toContain('Failed to load image');
+    const reloadBtn = errorBox.querySelector<HTMLButtonElement>('.gitlab-img-reload-btn')!;
+    expect(reloadBtn).not.toBeNull();
+    expect(reloadBtn.textContent).toContain('Reload');
+
+    // Click Reload -> removes error box, restores display, and starts retry
+    reloadBtn.click();
+    expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
+    expect(imgEl.style.display).toBe('inline');
+    expect(imgEl.classList.contains('gitlab-img-error')).toBe(false);
+    expect(imgEl.classList.contains('gitlab-img-loading')).toBe(true);
+
+    resolveRetry(new Uint8Array([1, 2, 3]).buffer);
+    await vi.waitFor(() => expect(imgEl.src).toBe('blob:reloaded'));
+    expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
+    cleanup();
+
+    // Also verify cleanup() removes visible error box
+    const imgEl2 = document.createElement('img');
+    container.appendChild(imgEl2);
+    const cleanup2 = loader.loadIntoElement(imgEl2, 'attachments/broken.png', 'main');
+    await vi.waitFor(() => expect(container.querySelector('.gitlab-img-error-box')).not.toBeNull());
+    cleanup2();
+    expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
   });
 });

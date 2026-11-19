@@ -34,6 +34,32 @@
   background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
 }
 
+.gitlab-img-error-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--text-error);
+  border-radius: 4px;
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
+}
+
+.gitlab-img-reload-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: var(--font-ui-small);
+  cursor: pointer;
+}
+
+.gitlab-img-reload-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
 .gitlab-sync-progress-wrap {
   display: flex;
   flex-direction: column;
