@@ -116,8 +116,13 @@ export class Plugin {
     return _command;
   }
 
-  addRibbonIcon(_icon: string, _title: string, _cb: () => unknown): unknown {
-    return {};
+  addRibbonIcon(_icon: string, title: string, _cb: () => unknown): HTMLElement {
+    if (typeof document !== 'undefined') {
+      const el = document.createElement('div');
+      el.setAttribute('aria-label', title);
+      return el;
+    }
+    return {} as unknown as HTMLElement;
   }
 
   addStatusBarItem(): HTMLElement {
@@ -134,6 +139,10 @@ export class Plugin {
   registerEditorExtension(_ext: unknown): void {}
 
   registerEvent(_eventRef: unknown): void {}
+
+  registerDomEvent(el: EventTarget, type: string, cb: EventListenerOrEventListenerObject): void {
+    el?.addEventListener?.(type, cb);
+  }
 }
 
 export class PluginSettingTab {

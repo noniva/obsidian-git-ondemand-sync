@@ -166,3 +166,45 @@
   justify-content: flex-end;
   gap: 8px;
 }
+
+.gitlab-ribbon-icon {
+  position: relative;
+}
+
+.gitlab-ribbon-badge {
+  display: none;
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.gitlab-ribbon-has-unpushed .gitlab-ribbon-badge {
+  display: inline-block;
+}
+
+.gitlab-ribbon-pull-dot {
+  display: none;
+  position: absolute;
+  bottom: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--color-green);
+  pointer-events: none;
+}
+
+.gitlab-ribbon-has-pull .gitlab-ribbon-pull-dot {
+  display: block;
+}

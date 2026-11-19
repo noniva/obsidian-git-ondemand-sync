@@ -101,6 +101,9 @@ if (typeof document !== 'undefined' && typeof HTMLElement !== 'undefined') {
 }
 
 const g = globalThis as Record<string, unknown>;
+if (typeof g.activeDocument === 'undefined' && typeof document !== 'undefined') {
+  g.activeDocument = document;
+}
 if (typeof g.createEl !== 'function') {
   g.createEl = <K extends keyof HTMLElementTagNameMap>(
     tag: K,

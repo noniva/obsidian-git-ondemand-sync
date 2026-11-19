@@ -16,6 +16,7 @@ import { registerMobileImageUpload } from './images/paste-upload';
 import { type ImageRenderContext, registerReadingViewImageProcessor } from './images/reading-view';
 import { GitLabSyncSettingTab } from './settings';
 import { SyncEngine, type SyncProgress, type VaultTextAdapter } from './sync/engine';
+import { SyncStatusTracker, type SyncStatusSummary } from './sync/status';
 import {
   DEFAULT_SETTINGS,
   type GitProvider,
@@ -52,6 +53,10 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   private client!: RemoteGitClient;
   private loader!: OnDemandImageLoader;
   private statusBarEl: HTMLElement | null = null;
+  private ribbonEl: HTMLElement | null = null;
+  private ribbonBadgeEl: HTMLElement | null = null;
+  private statusTracker: SyncStatusTracker | null = null;
+  private lastStatusLabel = 'Git: Idle';
   private activeProgressUpdate: ((progress: SyncProgress) => void) | null = null;
   private isSyncing = false;
 
@@ -78,8 +83,55 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     this.statusBarEl = this.addStatusBarItem?.() ?? null;
     this.updateStatusBar('Git: Idle');
 
-    this.addRibbonIcon('refresh-cw', 'Sync with Git', () => {
+    this.ribbonEl = this.addRibbonIcon('refresh-cw', 'Sync with Git', () => {
       void this.syncWithNotice();
+    });
+    if (this.ribbonEl && typeof this.ribbonEl.createSpan === 'function') {
+      this.ribbonEl.classList?.add('gitlab-ribbon-icon');
+      this.ribbonBadgeEl = this.ribbonEl.createSpan({ cls: 'gitlab-ribbon-badge' });
+      this.ribbonEl.createSpan({ cls: 'gitlab-ribbon-pull-dot' });
+    }
+
+    const vaultAdapter = this.createVaultAdapter();
+    this.statusTracker = new SyncStatusTracker({
+      vault: {
+        listTextFiles: () => vaultAdapter.listTextFiles(),
+        readText: (filePath) => vaultAdapter.readText(filePath),
+        exists: (filePath) => Boolean(this.app.vault.getAbstractFileByPath(filePath)),
+      },
+      getBranchHead: (branch) => this.client.getBranchHead(branch),
+      getState: () => this.syncState,
+      getSettings: () => this.settings,
+      getConfigDir: () => this.getConfigDir(),
+      isEnabled: () => this.isEnabled(),
+      isSyncing: () => this.isSyncing,
+      onChange: (summary) => this.renderSyncIndicator(summary),
+    });
+
+    this.registerEvent(
+      this.app.vault.on('create', (file) => this.statusTracker?.schedulePathRefresh(file.path)),
+    );
+    this.registerEvent(
+      this.app.vault.on('modify', (file) => this.statusTracker?.schedulePathRefresh(file.path)),
+    );
+    this.registerEvent(
+      this.app.vault.on('delete', (file) => this.statusTracker?.schedulePathRefresh(file.path)),
+    );
+    this.registerEvent(
+      this.app.vault.on('rename', (file, oldPath) =>
+        this.statusTracker?.handleRename(oldPath, file.path),
+      ),
+    );
+
+    if (typeof activeDocument !== 'undefined') {
+      this.registerDomEvent(activeDocument, 'visibilitychange', () => {
+        if (activeDocument.visibilityState === 'visible') {
+          void this.statusTracker?.checkRemoteUpdates();
+        }
+      });
+    }
+    this.registerDomEvent(window, 'focus', () => {
+      void this.statusTracker?.checkRemoteUpdates();
     });
 
     this.addCommand({
@@ -118,6 +170,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       if (!this.isEnabled()) {
         return;
       }
+      void this.statusTracker?.scanDirtyPaths();
       if (this.syncState.activeConflictBranch) {
         new Notice(
           `Git sync has active conflict branch "${this.syncState.activeConflictBranch}" awaiting desktop merge and "Clear Conflict State" in settings.`,
@@ -130,11 +183,14 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
         this.settings.projectId.trim()
       ) {
         void this.syncWithNotice();
+      } else {
+        void this.statusTracker?.checkRemoteUpdates();
       }
     });
   }
 
   override onunload(): void {
+    this.statusTracker?.dispose();
     this.loader?.revokeAll();
   }
 
@@ -458,6 +514,37 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     }
   }
 
+  private renderSyncIndicator(summary: SyncStatusSummary): void {
+    const parts: string[] = [];
+    if (summary.unpushedCount > 0) {
+      parts.push(`${summary.unpushedCount} to push`);
+    }
+    if (summary.hasRemoteUpdates) {
+      parts.push('Pull available');
+    }
+
+    if (this.ribbonBadgeEl) {
+      this.ribbonBadgeEl.textContent =
+        summary.unpushedCount > 0
+          ? summary.unpushedCount > 99
+            ? '99+'
+            : String(summary.unpushedCount)
+          : '';
+    }
+    if (this.ribbonEl) {
+      this.ribbonEl.classList?.toggle('gitlab-ribbon-has-unpushed', summary.unpushedCount > 0);
+      this.ribbonEl.classList?.toggle('gitlab-ribbon-has-pull', summary.hasRemoteUpdates);
+      this.ribbonEl.setAttribute?.(
+        'aria-label',
+        parts.length > 0 ? `Sync with Git (${parts.join(', ')})` : 'Sync with Git',
+      );
+    }
+
+    if (!this.isSyncing) {
+      this.updateStatusBar(parts.length > 0 ? `Git: ${parts.join(', ')}` : this.lastStatusLabel);
+    }
+  }
+
   private formatErrorMessage(error: unknown): string {
     const base = error instanceof Error ? error.message : String(error);
     const cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
@@ -533,6 +620,8 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   async clearConflictState(): Promise<void> {
     const engine = this.createSyncEngine();
     await engine.clearConflictBranch();
+    this.lastStatusLabel = 'Git: Idle';
+    await this.statusTracker?.resetAfterSync();
   }
 
   async syncWithNotice(): Promise<void> {
@@ -568,6 +657,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
       if (res.conflictBranch) {
         this.lastSyncStatus = `Conflict pushed to ${res.conflictBranch}`;
+        this.lastStatusLabel = 'Git: Conflict';
         this.updateStatusBar('Git: Conflict');
         new Notice(
           `Git sync conflict! Local changes were pushed to branch "${res.conflictBranch}". On desktop, run: git fetch && git merge origin/${res.conflictBranch}`,
@@ -576,15 +666,19 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       } else {
         const summary = `${res.pulled} pulled, ${res.pushed} pushed, ${res.deletedLocal} deleted (${this.syncState.remoteImagePaths.length} remote images indexed)`;
         this.lastSyncStatus = summary;
+        this.lastStatusLabel = 'Git: Synced';
         this.updateStatusBar('Git: Synced');
         new Notice(`Git sync complete: ${summary}.`);
       }
+      this.isSyncing = false;
+      await this.statusTracker?.resetAfterSync();
     } catch (error) {
       progressUi.notice.hide?.();
       console.error('[Git On-Demand Sync] Sync failed:', error);
       const message = this.formatErrorMessage(error);
       this.lastSyncError = message;
       this.lastSyncStatus = `Failed: ${message}`;
+      this.lastStatusLabel = 'Git: Sync failed';
       this.updateStatusBar('Git: Sync failed');
       new Notice(`Git sync failed: ${message} (click to dismiss)`, 0);
     } finally {

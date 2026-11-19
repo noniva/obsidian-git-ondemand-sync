@@ -102,6 +102,7 @@ function createVaultAppHarness(options?: {
   };
 
   const layoutReadyCallbacks: Array<() => void> = [];
+  const vaultListeners = new Map<string, Array<(...args: any[]) => unknown>>();
   const leafDispatches: Array<unknown> = [];
   const leafRerenders: Array<boolean | undefined> = [];
   const writeBinarySpy = vi.fn();
@@ -180,10 +181,20 @@ function createVaultAppHarness(options?: {
       }),
       readBinary: vi.fn(),
       delete: vi.fn(),
-      on: vi.fn(() => ({})),
+      on: vi.fn((name: string, cb: (...args: any[]) => unknown) => {
+        const list = vaultListeners.get(name) ?? [];
+        list.push(cb);
+        vaultListeners.set(name, list);
+        return { name, cb };
+      }),
     },
     workspace: {
-      on: vi.fn(() => ({})),
+      on: vi.fn((name: string, cb: (...args: any[]) => unknown) => {
+        const list = vaultListeners.get(name) ?? [];
+        list.push(cb);
+        vaultListeners.set(name, list);
+        return { name, cb };
+      }),
       onLayoutReady: vi.fn((cb: () => void) => {
         layoutReadyCallbacks.push(cb);
       }),
@@ -207,6 +218,12 @@ function createVaultAppHarness(options?: {
 
   return {
     app,
+    toTFile,
+    triggerVaultEvent: (name: string, ...args: unknown[]) => {
+      for (const cb of vaultListeners.get(name) ?? []) {
+        cb(...args);
+      }
+    },
     files,
     writeBinarySpy,
     createBinarySpy,
@@ -771,5 +788,75 @@ describe('GitLabOnDemandSyncPlugin', () => {
     for (const notice of notices) {
       expect(notice.message).not.toMatch(EMOJI_RE);
     }
+  });
+
+  it('shows unpushed file count badge and remote pull indicator on ribbon + status bar, and resets after sync', async () => {
+    const server = new FakeGitLabServer({ expectedToken: 'glpat-test' });
+    server.seedBranch('main', {
+      'notes/a.md': 'v1',
+    });
+    requestUrlBox.fn = server.requestFn;
+
+    const harness = createVaultAppHarness();
+    const plugin = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    let ribbonEl: HTMLElement | null = null;
+    const origAddRibbon = plugin.addRibbonIcon.bind(plugin);
+    vi.spyOn(plugin, 'addRibbonIcon').mockImplementation((icon, title, cb) => {
+      ribbonEl = origAddRibbon(icon, title, cb);
+      return ribbonEl;
+    });
+    let statusBarEl: HTMLElement | null = null;
+    const origAddStatus = plugin.addStatusBarItem.bind(plugin);
+    vi.spyOn(plugin, 'addStatusBarItem').mockImplementation(() => {
+      statusBarEl = origAddStatus();
+      return statusBarEl;
+    });
+
+    vi.spyOn(plugin, 'loadData').mockResolvedValueOnce({
+      settings: {
+        provider: 'gitlab',
+        apiUrl: 'https://gitlab.example.com',
+        projectId: '101',
+        token: 'glpat-test',
+        branch: 'main',
+        enableOnDesktop: true,
+      },
+    });
+    vi.spyOn(plugin, 'saveData').mockResolvedValue(undefined);
+
+    await plugin.onload();
+    await plugin.syncWithNotice();
+
+    // Advance remote branch on server (new pull waiting) + modify local note (1 unpushed)
+    server.commitOnBranch('main', 'remote update', [
+      { action: 'create', file_path: 'notes/remote-new.md', content: 'from-desktop' },
+    ]);
+    harness.files.set('notes/local-new.md', 'unpushed');
+    harness.triggerVaultEvent('create', harness.toTFile('notes/local-new.md'));
+
+    await vi.waitFor(
+      () => {
+        const badge = ribbonEl?.querySelector('.gitlab-ribbon-badge');
+        expect(badge?.textContent).toBe('1');
+        expect(ribbonEl?.classList.contains('gitlab-ribbon-has-unpushed')).toBe(true);
+      },
+      { timeout: 2000 },
+    );
+
+    // Advance clock past 60s cooldown and trigger focus resume -> detects pull available
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
+    window.dispatchEvent(new Event('focus'));
+    await vi.waitFor(() => {
+      expect(ribbonEl?.classList.contains('gitlab-ribbon-has-pull')).toBe(true);
+      expect(statusBarEl?.textContent).toBe('Git: 1 to push, Pull available');
+    });
+    nowSpy.mockRestore();
+
+    // Syncing clears both unpushed badge and pull indicator
+    await plugin.syncWithNotice();
+    expect(ribbonEl?.classList.contains('gitlab-ribbon-has-unpushed')).toBe(false);
+    expect(ribbonEl?.classList.contains('gitlab-ribbon-has-pull')).toBe(false);
+    expect(ribbonEl?.querySelector('.gitlab-ribbon-badge')?.textContent).toBe('');
+    expect(statusBarEl?.textContent).toBe('Git: Synced');
   });
 });
