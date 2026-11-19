@@ -1,13 +1,12 @@
 import { MarkdownView, Notice, TFile, type Editor, type Plugin } from 'obsidian';
-import type { GitLabClient } from '../gitlab/client';
 import type { OnDemandImageLoader } from './loader';
-import type { PluginSettings, SyncState } from '../types';
+import type { PluginSettings, RemoteGitClient, SyncState } from '../types';
 import { isIgnoredPath, isImagePath, normalizeVaultPath } from '../utils/paths';
 
 export interface PasteUploadDeps {
   settings: PluginSettings;
   state: SyncState;
-  client: GitLabClient;
+  client: Pick<RemoteGitClient, 'createCommit'>;
   loader: OnDemandImageLoader;
   saveState: () => Promise<void>;
   isEnabled: () => boolean;
@@ -20,7 +19,7 @@ export interface UploadPastedImageParams {
   mimeType: string;
   attachmentFolder: string;
   branch: string;
-  client: Pick<GitLabClient, 'createCommit'>;
+  client: Pick<RemoteGitClient, 'createCommit'>;
   state: SyncState;
   saveState: () => Promise<void>;
   now?: Date;
@@ -223,7 +222,7 @@ async function handleImageTransfer(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    new Notice(`Failed to upload image to GitLab: ${message}`);
+    new Notice(`Failed to upload image: ${message}`);
   } finally {
     if (marker) {
       const replacement = wikilinks.join('\n');
@@ -246,7 +245,7 @@ async function handleImageTransfer(
 }
 
 /**
- * Encodes a pasted/dropped image as base64 without Node `Buffer`, commits it directly to GitLab,
+ * Encodes a pasted/dropped image as base64 without Node `Buffer`, commits it directly to the remote repository,
  * records the new path in `state.remoteImagePaths`, and returns the repo path and wikilink.
  */
 export async function uploadPastedImage(
@@ -419,13 +418,13 @@ async function handleVaultImageCreate(
     deps.onUploaded?.();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    new Notice(`Failed to upload image to GitLab: ${message}`);
+    new Notice(`Failed to upload image: ${message}`);
   }
 }
 
 /**
  * Registers `editor-paste`, `editor-drop`, and `vault.on('create')` handlers that upload image
- * files directly to GitLab and cache their blobs in memory without keeping local mobile files.
+ * files directly to the remote repository and cache their blobs in memory without keeping local mobile files.
  */
 export function registerMobileImageUpload(
   plugin: Plugin,

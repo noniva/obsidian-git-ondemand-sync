@@ -1,5 +1,10 @@
-import type { GitLabClient } from '../gitlab/client';
-import type { GitLabCommitAction, GitLabTreeEntry, PluginSettings, SyncState } from '../types';
+import type {
+  PluginSettings,
+  RemoteCommitAction,
+  RemoteGitClient,
+  RemoteTreeEntry,
+  SyncState,
+} from '../types';
 import { isIgnoredPath, isImagePath, isTextSyncPath, sha256Hex } from '../utils/paths';
 import { computeSyncPlan, type LocalFileSnapshot, type SyncPlan } from './diff';
 
@@ -28,8 +33,8 @@ export interface SyncProgress {
 export interface SyncEngineOptions {
   settings: PluginSettings;
   state: SyncState;
-  client: Pick<GitLabClient, 'getBranchHead' | 'getTreeRecursive' | 'getRawText' | 'createCommit'> &
-    Partial<Pick<GitLabClient, 'getRawTextsBatch'>>;
+  client: Pick<RemoteGitClient, 'getBranchHead' | 'getTreeRecursive' | 'getRawText' | 'createCommit'> &
+    Partial<Pick<RemoteGitClient, 'getRawTextsBatch'>>;
   vault: VaultTextAdapter;
   saveState: () => Promise<void> | void;
   now?: () => Date;
@@ -53,8 +58,8 @@ function formatConflictBranchName(date: Date): string {
 function buildPushActions(
   plan: SyncPlan,
   localContents: Record<string, string>,
-): GitLabCommitAction[] {
-  const actions: GitLabCommitAction[] = [];
+): RemoteCommitAction[] {
+  const actions: RemoteCommitAction[] = [];
 
   for (const path of plan.pushCreates) {
     actions.push({
@@ -85,7 +90,7 @@ function buildPushActions(
 }
 
 /**
- * Orchestrates 3-way text-only vault synchronization against GitLab,
+ * Orchestrates 3-way text-only vault synchronization against a remote Git repository,
  * indexing remote images in memory and isolating conflicts onto a mobile branch.
  */
 export class SyncEngine {
@@ -177,7 +182,7 @@ export class SyncEngine {
       }
     }
 
-    let conflictTree: GitLabTreeEntry[] | null = null;
+    let conflictTree: RemoteTreeEntry[] | null = null;
     if (this.state.activeConflictBranch) {
       let conflictHeadSha: string;
       try {
@@ -186,7 +191,7 @@ export class SyncEngine {
         const message = err instanceof Error ? err.message : String(err);
         if (message.includes('(404)')) {
           throw new Error(
-            `Conflict branch "${this.state.activeConflictBranch}" no longer exists on GitLab (likely merged and deleted). Open Settings and click "Clear Conflict State" to adopt the merged target branch.`,
+            `Conflict branch "${this.state.activeConflictBranch}" no longer exists on remote (likely merged and deleted). Open Settings and click "Clear Conflict State" to adopt the merged target branch.`,
             { cause: err },
           );
         }
@@ -430,14 +435,14 @@ export class SyncEngine {
     localContents: Record<string, string>,
     localHashes: LocalFileSnapshot,
     remoteTextFiles: Record<string, string>,
-    conflictTree: GitLabTreeEntry[],
-  ): Promise<GitLabCommitAction[]> {
+    conflictTree: RemoteTreeEntry[],
+  ): Promise<RemoteCommitAction[]> {
     const conflictBranch = this.state.activeConflictBranch!;
     const conflictPaths = new Set(
       conflictTree.filter((entry) => entry.type === 'blob').map((entry) => entry.path),
     );
 
-    const actions: GitLabCommitAction[] = [];
+    const actions: RemoteCommitAction[] = [];
 
     for (const path of [...plan.pushCreates, ...plan.pushUpdates]) {
       if (conflictPaths.has(path)) {
@@ -620,7 +625,7 @@ export class SyncEngine {
 
   private async applyPushes(
     plan: SyncPlan,
-    actions: GitLabCommitAction[],
+    actions: RemoteCommitAction[],
     headSha: string,
     localHashes: LocalFileSnapshot,
   ): Promise<string> {
@@ -633,7 +638,7 @@ export class SyncEngine {
 
     this.emitProgress({
       stage: 'pushing',
-      message: `Pushing ${actions.length} change(s) to GitLab...`,
+      message: `Pushing ${actions.length} change(s)...`,
     });
 
     if (plan.targetPushBranch === 'target') {

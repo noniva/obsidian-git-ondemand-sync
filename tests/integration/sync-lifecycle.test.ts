@@ -1,9 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
+import { GitHubClient } from '../../src/github/client';
 import { GitLabClient, type RequestUrlFn } from '../../src/gitlab/client';
 import { OnDemandImageLoader, type BlobUrlApi } from '../../src/images/loader';
 import { uploadPastedImage } from '../../src/images/paste-upload';
 import { SyncEngine, type VaultTextAdapter } from '../../src/sync/engine';
 import { DEFAULT_SETTINGS, type PluginSettings, type SyncState } from '../../src/types';
+import { FakeGitHubServer } from '../helpers/fake-github';
 import { FakeGitLabServer } from '../helpers/fake-gitlab';
 
 function createMemoryVault(initial: Record<string, string> = {}) {
@@ -549,5 +551,139 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
       expect.anything(),
     );
     expect(Object.keys(files).sort()).toEqual(['notes/gallery.md', 'notes/one.md', 'notes/two.md']);
+  });
+});
+
+describe('End-to-End Sync Lifecycle (FakeGitHubServer)', () => {
+  it('handles initial pull, remote image indexing, conflict push (startSha), paste upload, and clearConflictBranch reconciliation', async () => {
+    const server = new FakeGitHubServer({ expectedToken: 'ghp-mobile-test' });
+    const logoBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+    const baseCommitSha = server.seedBranch('main', {
+      'notes/doc.md': 'line 1\nbase line 2\n',
+      'notes/บันทึก (1).md': 'Unicode base note\n',
+      'attachments/logo.png': logoBytes,
+    });
+
+    const settings: PluginSettings = {
+      ...DEFAULT_SETTINGS,
+      provider: 'github',
+      apiUrl: 'https://api.github.com',
+      projectId: 'owner/obsidian-vault',
+      branch: 'main',
+      token: 'ghp-mobile-test',
+    };
+    const client = new GitHubClient(
+      { baseUrl: settings.apiUrl, projectId: settings.projectId, token: settings.token },
+      server.requestFn,
+    );
+    const { vault, files } = createMemoryVault();
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const saveState = vi.fn();
+    const engine = new SyncEngine({
+      settings,
+      state,
+      client,
+      vault,
+      saveState,
+      now: () => new Date('2026-11-19T06:15:00Z'),
+    });
+
+    // 1. Initial empty-vault pull & remote image indexing without binary writes
+    const initRes = await engine.sync();
+    expect(initRes).toEqual({
+      pulled: 2,
+      deletedLocal: 0,
+      pushed: 0,
+      conflictBranch: null,
+      headCommitSha: baseCommitSha,
+    });
+    expect(files).toEqual({
+      'notes/doc.md': 'line 1\nbase line 2\n',
+      'notes/บันทึก (1).md': 'Unicode base note\n',
+    });
+    expect(state.remoteImagePaths).toEqual(['attachments/logo.png']);
+    expect(state.lastSyncedCommitSha).toBe(baseCommitSha);
+    expect(vault.writeBinary).not.toHaveBeenCalled();
+
+    // 2. Desktop edits main; Mobile diverges on doc.md and adds local notes
+    server.commitOnBranch('main', 'Desktop edit', [
+      {
+        action: 'update',
+        file_path: 'notes/doc.md',
+        content: 'line 1\ndesktop line\nbase line 2\n',
+        encoding: 'text',
+      },
+    ]);
+    files['notes/doc.md'] = 'line 1\nbase line 2\nmobile line\n';
+    files['notes/mobile-note.md'] = 'kept mobile note';
+    files['notes/drop-in-merge.md'] = 'mobile draft dropped by desktop merge';
+
+    // 3. Conflict push creates mobile-conflict/<timestamp> from baseCommitSha (startSha)
+    const conflictRes = await engine.sync();
+    expect(conflictRes.conflictBranch).toBe('mobile-conflict/20261119-061500');
+    expect(conflictRes.pushed).toBe(3);
+    expect(state.activeConflictBranch).toBe('mobile-conflict/20261119-061500');
+    expect(state.lastSyncedCommitSha).toBe(baseCommitSha);
+
+    const conflictBranchFiles = server.getBranchFiles(state.activeConflictBranch!);
+    expect(decodeText(conflictBranchFiles['notes/doc.md'])).toBe('line 1\nbase line 2\nmobile line\n');
+    expect(decodeText(conflictBranchFiles['notes/mobile-note.md'])).toBe('kept mobile note');
+
+    // 4. Mobile pastes an image onto activeConflictBranch via GitHubClient
+    const pastedBytes = new Uint8Array([82, 73, 70, 70, 10, 20, 30, 40]);
+    const pasteRes = await uploadPastedImage({
+      bytes: pastedBytes.buffer,
+      mimeType: 'image/webp',
+      attachmentFolder: 'attachments',
+      branch: state.activeConflictBranch!,
+      client,
+      state,
+      saveState,
+      now: new Date('2026-11-19T06:16:00Z'),
+    });
+    expect(pasteRes.repoPath).toBe('attachments/Pasted image 20261119061600.webp');
+    expect(state.remoteImagePaths).toContain(pasteRes.repoPath);
+    expect(server.getBranchFiles(state.activeConflictBranch!)[pasteRes.repoPath]).toEqual(pastedBytes);
+
+    // 5. Desktop merges into main, deletes conflict branch; Mobile reconciles via clearConflictBranch
+    files['notes/later.md'] = 'written after conflict push';
+    const mergedDoc = 'line 1\ndesktop line\nbase line 2\nmobile line\n';
+    const mergeSha = server.mergeBranch(state.activeConflictBranch!, 'main', {
+      resolvedFiles: {
+        'notes/doc.md': mergedDoc,
+        'notes/drop-in-merge.md': null,
+      },
+    });
+    server.deleteBranch(state.activeConflictBranch!);
+
+    await expect(engine.sync()).rejects.toThrow(/Clear Conflict State/i);
+
+    await engine.clearConflictBranch();
+    expect(files['notes/doc.md']).toBe(mergedDoc);
+    expect(files['notes/mobile-note.md']).toBe('kept mobile note');
+    expect(files['notes/drop-in-merge.md']).toBeUndefined();
+    expect(files['notes/later.md']).toBe('written after conflict push');
+    expect(state.activeConflictBranch).toBeNull();
+    expect(state.lastSyncedCommitSha).toBe(mergeSha);
+    expect(state.remoteImagePaths).toEqual(['attachments/logo.png', pasteRes.repoPath]);
+
+    // 6. Post-clear sync pushes post-push edit cleanly and converges to no-op
+    const postClearRes = await engine.sync();
+    expect(postClearRes.conflictBranch).toBeNull();
+    expect(postClearRes.pushed).toBe(1);
+
+    const noopRes = await engine.sync();
+    expect(noopRes).toEqual({
+      pulled: 0,
+      deletedLocal: 0,
+      pushed: 0,
+      conflictBranch: null,
+      headCommitSha: postClearRes.headCommitSha,
+    });
   });
 });
