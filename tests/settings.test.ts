@@ -45,6 +45,7 @@ function createMockPlugin(
     lastSyncError: null as string | null,
     saveAndRefreshSettings: vi.fn().mockResolvedValue(undefined),
     clearConflictState: vi.fn().mockResolvedValue(undefined),
+    clearImageCache: vi.fn().mockResolvedValue(undefined),
     syncWithNotice: vi.fn().mockResolvedValue(undefined),
   };
   return plugin as unknown as GitLabOnDemandSyncPlugin & {
@@ -52,6 +53,7 @@ function createMockPlugin(
     lastSyncError: string | null;
     saveAndRefreshSettings: ReturnType<typeof vi.fn>;
     clearConflictState: ReturnType<typeof vi.fn>;
+    clearImageCache: ReturnType<typeof vi.fn>;
     syncWithNotice: ReturnType<typeof vi.fn>;
   };
 }
@@ -107,8 +109,8 @@ describe('GitLabSyncSettingTab', () => {
     setTextValue(tab.containerEl, 'Attachment Folder', '   ');
     expect(plugin.settings.attachmentFolder).toBe('');
 
-    setTextValue(tab.containerEl, 'GitLab Base URL', '   ');
-    expect(plugin.settings.gitlabUrl).toBe(DEFAULT_SETTINGS.gitlabUrl);
+    setTextValue(tab.containerEl, 'API Base URL', '   ');
+    expect(plugin.settings.apiUrl).toBe(DEFAULT_SETTINGS.apiUrl);
 
     setTextValue(tab.containerEl, 'Branch', '');
     expect(plugin.settings.branch).toBe(DEFAULT_SETTINGS.branch);
@@ -119,7 +121,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('debounces text edits by 300ms and flushes immediately on hide()', async () => {
     vi.useFakeTimers();
-    const plugin = createMockPlugin();
+    const plugin = createMockPlugin({ provider: 'gitlab', apiUrl: 'https://gitlab.com' });
     const tab = new GitLabSyncSettingTab({} as App, plugin);
     tab.display();
 
@@ -203,7 +205,7 @@ describe('GitLabSyncSettingTab', () => {
     });
     getClearBtn().click();
     await vi.waitFor(() => expect(noticeMessages).toHaveLength(2));
-    expect(noticeMessages[1]).toBe('GitLab conflict state cleared.');
+    expect(noticeMessages[1]).toBe('Git conflict state cleared.');
     expect(getClearBtn().disabled).toBe(true);
   });
 
@@ -234,5 +236,56 @@ describe('GitLabSyncSettingTab', () => {
     )!;
     expect(refreshedDesc.textContent).toContain('1 pulled');
     expect(refreshedDesc.classList.contains('gitlab-sync-status-error')).toBe(false);
+  });
+
+  it('toggles Git Provider dropdown, switches default URLs vs preserving custom Enterprise URL, and updates labels', async () => {
+    const plugin = createMockPlugin();
+    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    tab.display();
+
+    // Default provider is GitHub
+    expect(() => findSettingRow(tab.containerEl, 'Repository (owner/repo)')).not.toThrow();
+
+    const select = findSettingRow(tab.containerEl, 'Git Provider').querySelector('select')!;
+    expect(select.value).toBe('github');
+
+    // Switch GitHub (default URL) -> GitLab: updates apiUrl to https://gitlab.com and re-renders labels
+    select.value = 'gitlab';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(plugin.saveAndRefreshSettings).toHaveBeenCalledTimes(1));
+    expect(plugin.settings.provider).toBe('gitlab');
+    expect(plugin.settings.apiUrl).toBe('https://gitlab.com');
+    expect(() => findSettingRow(tab.containerEl, 'Project ID / Path')).not.toThrow();
+
+    // Custom Enterprise URL is preserved when switching provider
+    plugin.settings.apiUrl = 'https://gitlab.enterprise.local';
+    tab.display();
+    const refreshedSelect = findSettingRow(tab.containerEl, 'Git Provider').querySelector('select')!;
+    refreshedSelect.value = 'github';
+    refreshedSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => expect(plugin.saveAndRefreshSettings).toHaveBeenCalledTimes(2));
+    expect(plugin.settings.provider).toBe('github');
+    expect(plugin.settings.apiUrl).toBe('https://gitlab.enterprise.local');
+  });
+
+  it('renders persistent image cache controls and triggers clearImageCache()', async () => {
+    const plugin = createMockPlugin();
+    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    tab.display();
+
+    toggleCheckbox(tab.containerEl, 'Persistent Image Cache');
+    await vi.waitFor(() => expect(plugin.saveAndRefreshSettings).toHaveBeenCalledTimes(1));
+    expect(plugin.settings.enablePersistentImageCache).toBe(false);
+
+    setTextValue(tab.containerEl, 'Max Image Cache (MB)', '0');
+    expect(plugin.settings.maxImageCacheMb).toBe(1);
+
+    setTextValue(tab.containerEl, 'Max Image Cache (MB)', '120');
+    expect(plugin.settings.maxImageCacheMb).toBe(120);
+
+    const clearCacheBtn = findSettingRow(tab.containerEl, 'Clear Image Cache').querySelector('button')!;
+    clearCacheBtn.click();
+    await vi.waitFor(() => expect(plugin.clearImageCache).toHaveBeenCalledTimes(1));
+    expect(noticeMessages).toContain('Image cache cleared.');
   });
 });

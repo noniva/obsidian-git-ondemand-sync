@@ -289,7 +289,9 @@ describe('GitLabOnDemandSyncPlugin', () => {
       },
     });
     await pluginPartial.onload();
-    expect(pluginPartial.settings.gitlabUrl).toBe(DEFAULT_SETTINGS.gitlabUrl);
+    expect(pluginPartial.settings.provider).toBe('gitlab');
+    expect(pluginPartial.settings.apiUrl).toBe('https://gitlab.com');
+    expect(pluginPartial.settings.gitlabUrl).toBeUndefined();
     expect(pluginPartial.settings.textAllowlist).toEqual(DEFAULT_SETTINGS.textAllowlist);
     expect(pluginPartial.settings.projectId).toBe('group/vault');
     expect(pluginPartial.syncState.conflictPushedHashes).toBeUndefined();
@@ -425,14 +427,14 @@ describe('GitLabOnDemandSyncPlugin', () => {
     await plugin.syncWithNotice();
     const progressNotice = noticeInstances[0];
     expect(progressNotice.timeout).toBe(0);
-    expect(notices[1].message).toBe('GitLab sync is already in progress.');
+    expect(notices[1].message).toBe('Git sync is already in progress.');
 
     releaseBranchFetch();
     await firstSync;
     expect(progressNotice.hidden).toBe(true);
     expect(progressNotice.messageEl.querySelector('.gitlab-sync-progress-bar')).not.toBeNull();
     expect(notices[2].message).toBe(
-      'GitLab sync complete: 1 pulled, 0 pushed, 0 deleted (0 remote images indexed).',
+      'Git sync complete: 1 pulled, 0 pushed, 0 deleted (0 remote images indexed).',
     );
     expect(plugin.lastSyncError).toBeNull();
 
@@ -444,7 +446,7 @@ describe('GitLabOnDemandSyncPlugin', () => {
     await plugin.syncWithNotice();
     const failNotice = notices[notices.length - 1];
     expect(failNotice.timeout).toBe(0);
-    expect(failNotice.message).toContain('GitLab sync failed:');
+    expect(failNotice.message).toContain('Git sync failed:');
     expect(failNotice.message).toContain('ENOTFOUND gitlab.example.com');
     expect(failNotice.message).toContain('click to dismiss');
     expect(plugin.lastSyncError).toContain('ENOTFOUND gitlab.example.com');
@@ -452,7 +454,7 @@ describe('GitLabOnDemandSyncPlugin', () => {
 
     requestUrlBox.fn = server.requestFn;
     await plugin.syncWithNotice();
-    expect(notices[notices.length - 1].message).toContain('GitLab sync complete:');
+    expect(notices[notices.length - 1].message).toContain('Git sync complete:');
     expect(plugin.lastSyncError).toBeNull();
 
     // Trigger conflict sync: modify both local and remote
@@ -462,7 +464,7 @@ describe('GitLabOnDemandSyncPlugin', () => {
     ]);
     await plugin.syncWithNotice();
     const conflictNotice = notices[notices.length - 1];
-    expect(conflictNotice.message).toContain('GitLab sync conflict!');
+    expect(conflictNotice.message).toContain('Git sync conflict!');
     expect(conflictNotice.message).toContain('mobile-conflict/');
     expect(plugin.syncState.lastSyncedCommitSha).toBe(baseSha);
 
@@ -574,5 +576,64 @@ describe('GitLabOnDemandSyncPlugin', () => {
     plugin.onunload();
     expect(revokeSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:plugin-1');
+  });
+
+  it('migrates legacy gitlabUrl settings, clamps maxImageCacheMb, and delegates clearImageCache()', async () => {
+    const clearSpy = vi.spyOn(OnDemandImageLoader.prototype, 'clearCache').mockResolvedValue(undefined);
+    const harness = createVaultAppHarness();
+    const plugin = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    vi.spyOn(plugin, 'loadData').mockResolvedValueOnce({
+      settings: {
+        gitlabUrl: 'https://gitlab.example.com',
+        projectId: 'team/notes',
+        token: 'glpat-legacy',
+        maxImageCacheMb: 0,
+      },
+    });
+
+    await plugin.onload();
+    expect(plugin.settings.provider).toBe('gitlab');
+    expect(plugin.settings.apiUrl).toBe('https://gitlab.example.com');
+    expect(plugin.settings.gitlabUrl).toBeUndefined();
+    expect(plugin.settings.maxImageCacheMb).toBe(1);
+
+    await plugin.clearImageCache();
+    expect(clearSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('instantiates GitHubClient (/repos/...) vs GitLabClient (/api/v4/projects/...) based on provider', async () => {
+    const requestedUrls: string[] = [];
+    requestUrlBox.fn = async (req: { url: string }) => {
+      requestedUrls.push(req.url);
+      return {
+        status: 404,
+        text: 'Not found',
+        arrayBuffer: new ArrayBuffer(0),
+        json: { message: 'Not Found' },
+        headers: {},
+      };
+    };
+
+    const harness = createVaultAppHarness();
+    const plugin = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    vi.spyOn(plugin, 'loadData').mockResolvedValueOnce({
+      settings: {
+        provider: 'github',
+        apiUrl: 'https://api.github.com',
+        projectId: 'octocat/vault',
+        token: 'ghp-test',
+        enableOnDesktop: true,
+      },
+    });
+    await plugin.onload();
+    await plugin.syncWithNotice();
+    expect(requestedUrls[0]).toContain('https://api.github.com/repos/octocat/vault/');
+
+    requestedUrls.length = 0;
+    plugin.settings.provider = 'gitlab';
+    plugin.settings.apiUrl = 'https://gitlab.example.com';
+    await plugin.saveAndRefreshSettings();
+    await plugin.syncWithNotice();
+    expect(requestedUrls[0]).toContain('https://gitlab.example.com/api/v4/projects/octocat%2Fvault/');
   });
 });

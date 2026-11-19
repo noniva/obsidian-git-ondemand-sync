@@ -250,6 +250,46 @@ class MockButtonComponent {
   }
 }
 
+class MockDropdownComponent {
+  selectEl: HTMLSelectElement;
+
+  constructor(containerEl: HTMLElement) {
+    this.selectEl = document.createElement('select');
+    containerEl.appendChild(this.selectEl);
+  }
+
+  addOption(value: string, display: string): this {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = display;
+    this.selectEl.appendChild(option);
+    return this;
+  }
+
+  addOptions(options: Record<string, string>): this {
+    for (const [value, display] of Object.entries(options)) {
+      this.addOption(value, display);
+    }
+    return this;
+  }
+
+  setValue(value: string): this {
+    this.selectEl.value = value;
+    return this;
+  }
+
+  getValue(): string {
+    return this.selectEl.value;
+  }
+
+  onChange(cb: (value: string) => unknown): this {
+    this.selectEl.addEventListener('change', () => {
+      void cb(this.selectEl.value);
+    });
+    return this;
+  }
+}
+
 export class Setting {
   settingEl: HTMLElement;
   infoEl: HTMLElement;
@@ -312,6 +352,13 @@ export class Setting {
   addButton(cb: (button: MockButtonComponent) => unknown): this {
     if (typeof document !== 'undefined') {
       cb(new MockButtonComponent(this.controlEl));
+    }
+    return this;
+  }
+
+  addDropdown(cb: (dropdown: MockDropdownComponent) => unknown): this {
+    if (typeof document !== 'undefined') {
+      cb(new MockDropdownComponent(this.controlEl));
     }
     return this;
   }

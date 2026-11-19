@@ -1,5 +1,6 @@
 import type { EditorView } from '@codemirror/view';
 import { Notice, Platform, Plugin } from 'obsidian';
+import { GitHubClient } from './github/client';
 import { GitLabClient } from './gitlab/client';
 import {
   createLivePreviewImageExtension,
@@ -10,7 +11,13 @@ import { registerMobileImageUpload } from './images/paste-upload';
 import { type ImageRenderContext, registerReadingViewImageProcessor } from './images/reading-view';
 import { GitLabSyncSettingTab } from './settings';
 import { SyncEngine, type SyncProgress, type VaultTextAdapter } from './sync/engine';
-import { DEFAULT_SETTINGS, type PluginSettings, type SyncState } from './types';
+import {
+  DEFAULT_SETTINGS,
+  type GitProvider,
+  type PluginSettings,
+  type RemoteGitClient,
+  type SyncState,
+} from './types';
 import { isIgnoredPath, isTextSyncPath, normalizeVaultPath } from './utils/paths';
 
 interface PersistedPluginData {
@@ -28,7 +35,7 @@ function createDefaultSyncState(): SyncState {
 }
 
 /**
- * Obsidian plugin that syncs text-only vault files with a private GitLab repository
+ * Obsidian plugin that syncs text-only vault files with a private GitHub or GitLab repository
  * and loads/uploads images on demand in memory with zero mobile disk writes.
  */
 export default class GitLabOnDemandSyncPlugin extends Plugin {
@@ -37,7 +44,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   lastSyncStatus = 'Not synced yet';
   lastSyncError: string | null = null;
 
-  private client!: GitLabClient;
+  private client!: RemoteGitClient;
   private loader!: OnDemandImageLoader;
   private statusBarEl: HTMLElement | null = null;
   private activeProgressUpdate: ((progress: SyncProgress) => void) | null = null;
@@ -48,22 +55,31 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
     this.client = this.createClient();
     // Delegate through `this.client` so settings changes take effect without recreating the loader.
-    this.loader = new OnDemandImageLoader({
-      getRawBinary: (filePath, ref) => this.client.getRawBinary(filePath, ref),
-    });
+    this.loader = new OnDemandImageLoader(
+      {
+        getRawBinary: (filePath, ref) => this.client.getRawBinary(filePath, ref),
+      },
+      globalThis.URL,
+      3,
+      50,
+      {
+        isPersistentCacheEnabled: () => this.settings.enablePersistentImageCache,
+        getMaxCacheBytes: () => Math.max(1, Math.floor(this.settings.maxImageCacheMb)) * 1024 * 1024,
+      },
+    );
 
     this.addSettingTab(new GitLabSyncSettingTab(this.app, this));
 
     this.statusBarEl = this.addStatusBarItem?.() ?? null;
-    this.updateStatusBar('GitLab: Idle');
+    this.updateStatusBar('Git: Idle');
 
-    this.addRibbonIcon('refresh-cw', 'Sync with GitLab', () => {
+    this.addRibbonIcon('refresh-cw', 'Sync with Git', () => {
       void this.syncWithNotice();
     });
 
     this.addCommand({
       id: 'sync-with-gitlab',
-      name: 'Sync with GitLab',
+      name: 'Sync with Git',
       callback: () => {
         void this.syncWithNotice();
       },
@@ -91,7 +107,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       }
       if (this.syncState.activeConflictBranch) {
         new Notice(
-          `GitLab sync has active conflict branch "${this.syncState.activeConflictBranch}" awaiting desktop merge and "Clear Conflict State" in settings.`,
+          `Git sync has active conflict branch "${this.syncState.activeConflictBranch}" awaiting desktop merge and "Clear Conflict State" in settings.`,
           10000,
         );
       }
@@ -146,18 +162,37 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     await this.savePluginData();
   }
 
-  private createClient(): GitLabClient {
-    return new GitLabClient({
-      baseUrl: this.settings.gitlabUrl ?? this.settings.apiUrl,
+  /**
+   * Clears all persistently cached remote images from local WebView storage.
+   */
+  async clearImageCache(): Promise<void> {
+    await this.loader.clearCache();
+  }
+
+  private createClient(): RemoteGitClient {
+    const config = {
+      baseUrl: this.settings.apiUrl,
       projectId: this.settings.projectId,
       token: this.settings.token,
-      onRateLimitWait: ({ waitMs, attempt, maxAttempts }) => {
+      onRateLimitWait: ({
+        waitMs,
+        attempt,
+        maxAttempts,
+      }: {
+        waitMs: number;
+        attempt: number;
+        maxAttempts: number;
+      }) => {
         const seconds = Math.max(1, Math.ceil(waitMs / 1000));
-        const message = `Rate limited by GitLab, retrying in ${seconds}s (${attempt}/${maxAttempts})...`;
+        const providerLabel = this.settings.provider === 'github' ? 'GitHub' : 'GitLab';
+        const message = `Rate limited by ${providerLabel}, retrying in ${seconds}s (${attempt}/${maxAttempts})...`;
         this.activeProgressUpdate?.({ stage: 'pulling', message });
-        this.updateStatusBar(`GitLab: Rate limit (${seconds}s)`);
+        this.updateStatusBar(`Git: Rate limit (${seconds}s)`);
       },
-    });
+    };
+    return this.settings.provider === 'github'
+      ? new GitHubClient(config)
+      : new GitLabClient(config);
   }
 
   private async loadPluginData(): Promise<void> {
@@ -165,13 +200,44 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     const rawSettings = raw && typeof raw === 'object' ? raw.settings : undefined;
     const rawSyncState = raw && typeof raw === 'object' ? raw.syncState : undefined;
 
+    const legacyGitlabUrl = typeof rawSettings?.gitlabUrl === 'string' ? rawSettings.gitlabUrl.trim() : '';
+    const legacyProjectId = typeof rawSettings?.projectId === 'string' ? rawSettings.projectId.trim() : '';
+    const explicitProvider =
+      rawSettings?.provider === 'github' || rawSettings?.provider === 'gitlab'
+        ? rawSettings.provider
+        : undefined;
+
+    let provider: GitProvider;
+    let apiUrl: string;
+    if (explicitProvider) {
+      provider = explicitProvider;
+      const defaultUrl = provider === 'github' ? 'https://api.github.com' : 'https://gitlab.com';
+      apiUrl = rawSettings?.apiUrl?.trim() || legacyGitlabUrl || defaultUrl;
+    } else if (legacyGitlabUrl || legacyProjectId) {
+      provider = 'gitlab';
+      apiUrl = rawSettings?.apiUrl?.trim() || legacyGitlabUrl || 'https://gitlab.com';
+    } else {
+      provider = DEFAULT_SETTINGS.provider;
+      apiUrl = rawSettings?.apiUrl?.trim() || DEFAULT_SETTINGS.apiUrl;
+    }
+
+    const rawMaxCacheMb = rawSettings?.maxImageCacheMb;
+    const maxImageCacheMb =
+      typeof rawMaxCacheMb === 'number' && Number.isFinite(rawMaxCacheMb)
+        ? Math.max(1, Math.floor(rawMaxCacheMb))
+        : DEFAULT_SETTINGS.maxImageCacheMb;
+
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...(rawSettings ?? {}),
+      provider,
+      apiUrl,
+      maxImageCacheMb,
       textAllowlist: Array.isArray(rawSettings?.textAllowlist)
         ? [...rawSettings.textAllowlist]
         : [...DEFAULT_SETTINGS.textAllowlist],
     };
+    delete this.settings.gitlabUrl;
 
     const syncState: SyncState = {
       ...createDefaultSyncState(),
@@ -316,12 +382,12 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     update: (progress: SyncProgress) => void;
   } {
     if (typeof document === 'undefined') {
-      const notice = new Notice('GitLab Sync: Starting...', 0);
+      const notice = new Notice('Git Sync: Starting...', 0);
       return {
         notice,
         update: (progress) => {
-          notice.setMessage?.(`GitLab Sync: ${progress.message}`);
-          this.updateStatusBar(`GitLab: ${progress.message}`);
+          notice.setMessage?.(`Git Sync: ${progress.message}`);
+          this.updateStatusBar(`Git: ${progress.message}`);
         },
       };
     }
@@ -331,7 +397,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
     const textEl = document.createElement('div');
     textEl.className = 'gitlab-sync-progress-text';
-    textEl.textContent = 'GitLab Sync: Starting...';
+    textEl.textContent = 'Git Sync: Starting...';
 
     const barEl = document.createElement('progress');
     barEl.className = 'gitlab-sync-progress-bar';
@@ -344,7 +410,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     return {
       notice,
       update: (progress) => {
-        textEl.textContent = `GitLab Sync: ${progress.message}`;
+        textEl.textContent = `Git Sync: ${progress.message}`;
         if (
           typeof progress.current === 'number' &&
           typeof progress.total === 'number' &&
@@ -356,7 +422,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
           barEl.removeAttribute('value');
           barEl.removeAttribute('max');
         }
-        this.updateStatusBar(`GitLab: ${progress.message}`);
+        this.updateStatusBar(`Git: ${progress.message}`);
       },
     };
   }
@@ -384,23 +450,23 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   async syncWithNotice(): Promise<void> {
     if (!this.isEnabled()) {
       new Notice(
-        'GitLab On-Demand Sync is disabled on desktop. Enable "Enable on Desktop (Testing)" in settings.',
+        'Git On-Demand Sync is disabled on desktop. Enable "Enable on Desktop (Testing)" in settings.',
       );
       return;
     }
 
     if (!this.settings.projectId.trim() || !this.settings.token.trim()) {
-      new Notice('Please configure GitLab Project ID and Personal Access Token in settings.');
+      new Notice('Please configure Repository / Project ID and Personal Access Token in settings.');
       return;
     }
 
     if (this.isSyncing) {
-      new Notice('GitLab sync is already in progress.');
+      new Notice('Git sync is already in progress.');
       return;
     }
 
     this.isSyncing = true;
-    this.updateStatusBar('GitLab: Syncing...');
+    this.updateStatusBar('Git: Syncing...');
     const progressUi = this.createSyncProgressNotice();
     this.activeProgressUpdate = (progress) => progressUi.update(progress);
 
@@ -414,25 +480,25 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
       if (res.conflictBranch) {
         this.lastSyncStatus = `Conflict pushed to ${res.conflictBranch}`;
-        this.updateStatusBar('GitLab: Conflict');
+        this.updateStatusBar('Git: Conflict');
         new Notice(
-          `GitLab sync conflict! Local changes were pushed to branch "${res.conflictBranch}". On desktop, run: git fetch && git merge origin/${res.conflictBranch}`,
+          `Git sync conflict! Local changes were pushed to branch "${res.conflictBranch}". On desktop, run: git fetch && git merge origin/${res.conflictBranch}`,
           15000,
         );
       } else {
         const summary = `${res.pulled} pulled, ${res.pushed} pushed, ${res.deletedLocal} deleted (${this.syncState.remoteImagePaths.length} remote images indexed)`;
         this.lastSyncStatus = summary;
-        this.updateStatusBar('GitLab: Synced');
-        new Notice(`GitLab sync complete: ${summary}.`);
+        this.updateStatusBar('Git: Synced');
+        new Notice(`Git sync complete: ${summary}.`);
       }
     } catch (error) {
       progressUi.notice.hide?.();
-      console.error('[GitLab On-Demand Sync] Sync failed:', error);
+      console.error('[Git On-Demand Sync] Sync failed:', error);
       const message = this.formatErrorMessage(error);
       this.lastSyncError = message;
       this.lastSyncStatus = `Failed: ${message}`;
-      this.updateStatusBar('GitLab: Sync failed');
-      new Notice(`GitLab sync failed: ${message} (click to dismiss)`, 0);
+      this.updateStatusBar('Git: Sync failed');
+      new Notice(`Git sync failed: ${message} (click to dismiss)`, 0);
     } finally {
       this.activeProgressUpdate = null;
       this.isSyncing = false;
