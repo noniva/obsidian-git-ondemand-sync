@@ -253,5 +253,11 @@ describe('registerReadingViewImageProcessor', () => {
     expect(children).toHaveLength(1);
     expect(observeAndLoad).toHaveBeenCalledTimes(1);
     expect(observeAndLoad).toHaveBeenCalledWith(expect.any(HTMLImageElement), 'Asset/pic.png', 'main', undefined);
+
+    // Simulate host DOM overwrite clearing children while keeping data-gitlab-processed
+    embedEl.replaceChildren(document.createTextNode('pic.png'));
+    const { children: rehydrated } = await runProcessor(embedEl);
+    expect(rehydrated).toHaveLength(1);
+    expect(observeAndLoad).toHaveBeenCalledTimes(2);
   });
 });

@@ -53,11 +53,15 @@ export function hydrateRemoteEmbed(
   noteDir: string,
   ctx: ImageRenderContext,
 ): (() => void) | null {
-  if (embedEl.dataset.gitlabProcessed === 'true') {
+  if (embedEl.dataset.gitlabProcessed === 'true' && embedEl.querySelector('.gitlab-ondemand-img')) {
     return null;
   }
 
-  const rawTarget = embedEl.getAttribute('src') ?? embedEl.getAttribute('data-src') ?? '';
+  const rawTarget =
+    embedEl.getAttribute('src') ??
+    embedEl.getAttribute('data-src') ??
+    embedEl.getAttribute('alt') ??
+    '';
   const parsed = parseImageEmbed(rawTarget);
   if (!parsed || !isImagePath(parsed.target)) {
     return null;

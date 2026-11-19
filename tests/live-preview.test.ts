@@ -366,4 +366,31 @@ describe('createLivePreviewImageExtension', () => {
     expect(client.getRawBinary).toHaveBeenCalledTimes(2);
     expect(view.state.selection.main.head).toBe(0);
   });
+
+  it('hydrates built-in .internal-embed when src attribute is added after insertion', async () => {
+    const cleanup = vi.fn();
+    const observeAndLoad = vi.fn().mockReturnValue(cleanup);
+    const ctx: ImageRenderContext = {
+      settings: { ...DEFAULT_SETTINGS },
+      state: {
+        lastSyncedCommitSha: 'c1',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: ['Asset/late.png'],
+      },
+      loader: { observeAndLoad } as unknown as OnDemandImageLoader,
+      isLocalFilePresent: () => false,
+      isEnabled: () => true,
+    };
+
+    const view = mountEditor('Intro', () => ctx, { cursor: 0 });
+    const builtInEmbed = document.createElement('div');
+    builtInEmbed.className = 'internal-embed image-embed is-unresolved';
+    view.contentDOM.appendChild(builtInEmbed);
+    builtInEmbed.setAttribute('src', 'late.png');
+    await vi.waitFor(() => expect(observeAndLoad).toHaveBeenCalledTimes(1));
+
+    view.destroy();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
 });

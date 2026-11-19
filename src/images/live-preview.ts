@@ -257,7 +257,12 @@ export function createLivePreviewImageExtension(getContext: () => ImageRenderCon
             typeof MutationObserver === 'function'
               ? new MutationObserver(() => this.syncBuiltInEmbeds())
               : null;
-          this.observer?.observe(view.contentDOM, { childList: true, subtree: true });
+          this.observer?.observe(view.contentDOM, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src', 'data-src'],
+          });
           this.syncBuiltInEmbeds();
         }
 
@@ -314,6 +319,7 @@ export function createLivePreviewImageExtension(getContext: () => ImageRenderCon
           for (const embedEl of Array.from(embeds)) {
             const cleanup = hydrateRemoteEmbed(embedEl, noteDir, ctx);
             if (cleanup) {
+              this.domEmbedCleanups.get(embedEl)?.();
               this.domEmbedCleanups.set(embedEl, cleanup);
             }
           }
