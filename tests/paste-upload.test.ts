@@ -185,6 +185,65 @@ describe('uploadPastedImage', () => {
     const actionContent = client.createCommit.mock.calls[0][0].actions[0].content;
     expect(actionContent).toBe('QUFB'.repeat(23333) + 'QQ==');
   });
+
+  it('compresses large PNG to WebP before upload and returns compressed bytes and mimeType', async () => {
+    const closeSpy = vi.fn();
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ width: 2400, height: 1200, close: closeSpy }));
+    const compressedBytes = new Uint8Array([82, 73, 70, 70]).buffer; // "RIFF"
+    const canvas = {
+      width: 0,
+      height: 0,
+      getContext: vi.fn(() => ({ drawImage: vi.fn() })),
+      toBlob: vi.fn((cb: (b: Blob | null) => void) =>
+        cb({
+          size: compressedBytes.byteLength,
+          arrayBuffer: vi.fn().mockResolvedValue(compressedBytes),
+        } as unknown as Blob),
+      ),
+    };
+    vi.stubGlobal('document', { createElement: vi.fn(() => canvas) });
+
+    try {
+      const state: SyncState = {
+        lastSyncedCommitSha: 'c0',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: [],
+      };
+      const client = { createCommit: vi.fn().mockResolvedValue('c_webp') } as any;
+      const saveState = vi.fn().mockResolvedValue(undefined);
+      const largePng = new Uint8Array(60_000).fill(1).buffer;
+
+      const res = await uploadPastedImage({
+        bytes: largePng,
+        mimeType: 'image/png',
+        attachmentFolder: 'attachments',
+        branch: 'main',
+        client,
+        state,
+        saveState,
+        now: new Date('2026-11-19T04:10:00Z'),
+        compressOptions: { enabled: true, maxDimension: 1920 },
+      });
+
+      expect(res.repoPath).toBe('attachments/Pasted image 20261119041000.webp');
+      expect(res.wikilink).toBe('![[attachments/Pasted image 20261119041000.webp]]');
+      expect(res.mimeType).toBe('image/webp');
+      expect(res.bytes).toBe(compressedBytes);
+      expect(client.createCommit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actions: [
+            expect.objectContaining({
+              file_path: 'attachments/Pasted image 20261119041000.webp',
+              content: 'UklGRg==',
+            }),
+          ],
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('registerMobileImageUpload', () => {
@@ -731,7 +790,7 @@ describe('registerMobileImageUpload', () => {
       ed1.editor,
     );
 
-    await Promise.resolve();
+    await vi.waitFor(() => expect(createCommit).toHaveBeenCalledTimes(1));
     expect(ed1.getDoc()).toMatch(/<!-- uploading-gitlab-image-\d+ -->/);
     ed1.appendAtEnd(' + tail edit');
 

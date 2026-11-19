@@ -14,6 +14,8 @@ export interface PluginSettings {
   enableOnDesktop: boolean;
   enablePersistentImageCache: boolean;
   maxImageCacheMb: number;
+  compressImagesOnUpload: boolean;
+  maxUploadImageDimension: number;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -29,6 +31,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   enableOnDesktop: false,
   enablePersistentImageCache: true,
   maxImageCacheMb: 50,
+  compressImagesOnUpload: true,
+  maxUploadImageDimension: 1920,
 };
 
 export interface SyncedFileEntry {

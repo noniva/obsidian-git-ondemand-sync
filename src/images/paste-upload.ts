@@ -1,4 +1,5 @@
 import { MarkdownView, Notice, TFile, type Editor, type Plugin } from 'obsidian';
+import { compressImageForUpload, type CompressImageOptions } from './compress';
 import type { OnDemandImageLoader } from './loader';
 import type { PluginSettings, RemoteGitClient, SyncState } from '../types';
 import { isIgnoredPath, isImagePath, normalizeVaultPath } from '../utils/paths';
@@ -23,11 +24,14 @@ export interface UploadPastedImageParams {
   state: SyncState;
   saveState: () => Promise<void>;
   now?: Date;
+  compressOptions?: CompressImageOptions;
 }
 
 export interface UploadPastedImageResult {
   repoPath: string;
   wikilink: string;
+  bytes: ArrayBuffer;
+  mimeType: string;
 }
 
 const BASE64_CHUNK_SIZE = 0x8000;
@@ -210,9 +214,16 @@ async function handleImageTransfer(
         client: deps.client,
         state: deps.state,
         saveState: deps.saveState,
+        compressOptions: {
+          enabled: deps.settings.compressImagesOnUpload,
+          maxDimension: deps.settings.maxUploadImageDimension,
+        },
       });
 
-      deps.loader.registerMemoryImage(result.repoPath, new Blob([bytes], { type: mimeType }));
+      deps.loader.registerMemoryImage(
+        result.repoPath,
+        new Blob([result.bytes], { type: result.mimeType }),
+      );
       if (canTrackRange) {
         wikilinks.push(result.wikilink);
       } else {
@@ -252,14 +263,19 @@ export async function uploadPastedImage(
   params: UploadPastedImageParams,
 ): Promise<UploadPastedImageResult> {
   const now = params.now ?? new Date();
-  const ext = extensionFromMimeType(params.mimeType);
+  const compressed = await compressImageForUpload(
+    params.bytes,
+    params.mimeType,
+    params.compressOptions,
+  );
+  const ext = extensionFromMimeType(compressed.mimeType);
   const repoPath = buildUniqueRepoPath(
     params.attachmentFolder,
     formatTimestampUtc(now),
     ext,
     params.state.remoteImagePaths,
   );
-  const content = arrayBufferToBase64(params.bytes);
+  const content = arrayBufferToBase64(compressed.bytes);
 
   await params.client.createCommit({
     branch: params.branch,
@@ -282,6 +298,8 @@ export async function uploadPastedImage(
   return {
     repoPath,
     wikilink: `![[${repoPath}]]`,
+    bytes: compressed.bytes,
+    mimeType: compressed.mimeType,
   };
 }
 
@@ -388,9 +406,16 @@ async function handleVaultImageCreate(
       client: deps.client,
       state: deps.state,
       saveState: deps.saveState,
+      compressOptions: {
+        enabled: deps.settings.compressImagesOnUpload,
+        maxDimension: deps.settings.maxUploadImageDimension,
+      },
     });
 
-    deps.loader.registerMemoryImage(result.repoPath, new Blob([bytes], { type: mimeType }));
+    deps.loader.registerMemoryImage(
+      result.repoPath,
+      new Blob([result.bytes], { type: result.mimeType }),
+    );
     await plugin.app.vault.delete(file);
 
     const editor = getActiveMarkdownEditor(plugin);
