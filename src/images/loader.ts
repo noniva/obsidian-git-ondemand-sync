@@ -77,13 +77,14 @@ export class OnDemandImageLoader {
   private readonly activeCleanups = new Set<() => void>();
   private readonly errorBoxes = new WeakMap<HTMLImageElement, HTMLElement>();
   private readonly savedDisplay = new WeakMap<HTMLImageElement, string>();
+  private readonly imgErrorCleanups = new WeakMap<HTMLImageElement, () => void>();
   private activeCount = 0;
 
   constructor(
     client: Pick<RemoteGitClient, 'getRawBinary'>,
     blobApi: BlobUrlApi = globalThis.URL,
     maxConcurrent = 3,
-    maxMemoryImages = 50,
+    maxMemoryImages = 150,
     cacheOptions?: ImageCacheOptions,
   ) {
     this.client = client;
@@ -106,10 +107,48 @@ export class OnDemandImageLoader {
     fallbackRef?: string,
   ): () => void {
     const cacheKey = normalizeVaultPath(repoPath);
+    let disposed = false;
+    let retryCleanup: (() => void) | null = null;
+
+    const handleDecodeError = (failedUrl: string): void => {
+      if (disposed) {
+        return;
+      }
+      const entry = this.memoryImages.get(cacheKey);
+      if (entry?.url === failedUrl) {
+        this.memoryImages.delete(cacheKey);
+      }
+      this.revokeUrl(failedUrl);
+      imgEl.classList?.remove('gitlab-img-loading', 'gitlab-img-loaded');
+      imgEl.classList?.add('gitlab-img-error');
+      if (imgEl.dataset) {
+        imgEl.dataset.gitlabError = 'Failed to decode image';
+      }
+      this.renderStatusBox(imgEl, 'Failed to load image', true, () => {
+        if (disposed) {
+          return;
+        }
+        this.removeErrorBox(imgEl);
+        imgEl.classList?.remove('gitlab-img-error');
+        imgEl.classList?.add('gitlab-img-loading');
+        if (imgEl.dataset) {
+          delete imgEl.dataset.gitlabError;
+        }
+        retryCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
+      });
+    };
+
     const cached = this.findTier1Hit(cacheKey, ref, fallbackRef);
     if (cached) {
-      this.applyLoadedUrl(imgEl, repoPath, cached.url);
-      return () => {};
+      this.applyLoadedUrl(imgEl, repoPath, cached.url, () => handleDecodeError(cached.url));
+      return () => {
+        disposed = true;
+        this.imgErrorCleanups.get(imgEl)?.();
+        this.imgErrorCleanups.delete(imgEl);
+        this.removeErrorBox(imgEl);
+        retryCleanup?.();
+        retryCleanup = null;
+      };
     }
 
     if (imgEl.dataset) {
@@ -117,7 +156,6 @@ export class OnDemandImageLoader {
     }
     imgEl.classList?.add('gitlab-img-loading');
 
-    let retryCleanup: (() => void) | null = null;
     const triggerReload = (): void => {
       if (task.cancelled) {
         return;
@@ -144,7 +182,9 @@ export class OnDemandImageLoader {
         try {
           const existingHit = this.findTier1Hit(cacheKey, ref, fallbackRef);
           if (existingHit) {
-            this.applyLoadedUrl(imgEl, repoPath, existingHit.url);
+            this.applyLoadedUrl(imgEl, repoPath, existingHit.url, () =>
+              handleDecodeError(existingHit.url),
+            );
             return;
           }
 
@@ -161,7 +201,7 @@ export class OnDemandImageLoader {
                 return;
               }
               this.storeMemoryImage(cacheKey, url, tier2Hit.ref);
-              this.applyLoadedUrl(imgEl, repoPath, url);
+              this.applyLoadedUrl(imgEl, repoPath, url, () => handleDecodeError(url));
               return;
             }
           }
@@ -194,7 +234,7 @@ export class OnDemandImageLoader {
           }
 
           this.storeMemoryImage(cacheKey, url, usedRef);
-          this.applyLoadedUrl(imgEl, repoPath, url);
+          this.applyLoadedUrl(imgEl, repoPath, url, () => handleDecodeError(url));
           void this.writePersistentCache(cacheKey, usedRef, buffer, mimeType);
         } catch (err) {
           if (!task.cancelled) {
@@ -213,6 +253,7 @@ export class OnDemandImageLoader {
       if (task.cancelled) {
         return;
       }
+      disposed = true;
       task.cancelled = true;
       this.activeCleanups.delete(cleanup);
 
@@ -222,6 +263,8 @@ export class OnDemandImageLoader {
       }
 
       imgEl.classList?.remove('gitlab-img-loading');
+      this.imgErrorCleanups.get(imgEl)?.();
+      this.imgErrorCleanups.delete(imgEl);
       this.removeErrorBox(imgEl);
       retryCleanup?.();
       retryCleanup = null;
@@ -574,7 +617,14 @@ export class OnDemandImageLoader {
     }
   }
 
-  private applyLoadedUrl(imgEl: HTMLImageElement, repoPath: string, url: string): void {
+  private applyLoadedUrl(
+    imgEl: HTMLImageElement,
+    repoPath: string,
+    url: string,
+    onDecodeError?: () => void,
+  ): void {
+    this.imgErrorCleanups.get(imgEl)?.();
+    this.imgErrorCleanups.delete(imgEl);
     this.removeErrorBox(imgEl);
     imgEl.src = url;
     if (imgEl.dataset) {
@@ -582,6 +632,23 @@ export class OnDemandImageLoader {
     }
     imgEl.classList?.remove('gitlab-img-loading', 'gitlab-img-error');
     imgEl.classList?.add('gitlab-img-loaded');
+
+    if (onDecodeError && typeof imgEl.addEventListener === 'function') {
+      const handleError = (): void => {
+        this.imgErrorCleanups.delete(imgEl);
+        onDecodeError();
+      };
+      const handleLoad = (): void => {
+        this.imgErrorCleanups.delete(imgEl);
+        imgEl.removeEventListener?.('error', handleError);
+      };
+      imgEl.addEventListener('error', handleError, { once: true });
+      imgEl.addEventListener('load', handleLoad, { once: true });
+      this.imgErrorCleanups.set(imgEl, () => {
+        imgEl.removeEventListener?.('error', handleError);
+        imgEl.removeEventListener?.('load', handleLoad);
+      });
+    }
   }
 
   private revokeUrl(url: string): void {

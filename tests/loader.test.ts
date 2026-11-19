@@ -655,4 +655,39 @@ describe('OnDemandImageLoader', () => {
     expect(container.querySelector('.gitlab-img-status-box')).toBeNull();
     cleanup();
   });
+
+  it('shows Reload button and invalidates broken Tier 1 cache if img fires decode error after src is set', async () => {
+    const container = document.createElement('span');
+    const imgEl = document.createElement('img');
+    container.appendChild(imgEl);
+
+    let seq = 0;
+    const blobApi = {
+      createObjectURL: vi.fn(() => `blob:decode-${++seq}`),
+      revokeObjectURL: vi.fn(),
+    };
+    const client = {
+      getRawBinary: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]).buffer),
+    } as any;
+    const loader = new OnDemandImageLoader(client, blobApi, 3);
+
+    const cleanup = loader.loadIntoElement(imgEl, 'attachments/decode-err.png', 'main');
+    await vi.waitFor(() => expect(imgEl.src).toBe('blob:decode-1'));
+
+    // Simulate Chromium firing error event on broken/revoked blob URL
+    imgEl.dispatchEvent(new Event('error'));
+
+    const errorBox = container.querySelector('.gitlab-img-error-box');
+    expect(errorBox).not.toBeNull();
+    expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:decode-1');
+    expect(imgEl.classList.contains('gitlab-img-error')).toBe(true);
+
+    // Click Reload -> re-fetches instead of hitting broken Tier 1 cache
+    const reloadBtn = errorBox!.querySelector<HTMLButtonElement>('.gitlab-img-reload-btn')!;
+    reloadBtn.click();
+    await vi.waitFor(() => expect(imgEl.src).toBe('blob:decode-2'));
+    expect(client.getRawBinary).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
+    cleanup();
+  });
 });
