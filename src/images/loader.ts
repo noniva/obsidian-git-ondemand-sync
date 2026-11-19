@@ -118,6 +118,25 @@ export class OnDemandImageLoader {
     imgEl.classList?.add('gitlab-img-loading');
 
     let retryCleanup: (() => void) | null = null;
+    const triggerReload = (): void => {
+      if (task.cancelled) {
+        return;
+      }
+      task.cancelled = true;
+      const queueIdx = this.queue.indexOf(task);
+      if (queueIdx >= 0) {
+        this.queue.splice(queueIdx, 1);
+      }
+      this.removeErrorBox(imgEl);
+      imgEl.classList?.remove('gitlab-img-error');
+      imgEl.classList?.add('gitlab-img-loading');
+      if (imgEl.dataset) {
+        delete imgEl.dataset.gitlabError;
+      }
+      retryCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
+    };
+
+    this.renderStatusBox(imgEl, 'Loading image...', false, triggerReload);
 
     const task: QueuedLoadTask = {
       cancelled: false,
@@ -184,18 +203,7 @@ export class OnDemandImageLoader {
             if (imgEl.dataset) {
               imgEl.dataset.gitlabError = err instanceof Error ? err.message : String(err);
             }
-            this.renderErrorBox(imgEl, () => {
-              if (task.cancelled) {
-                return;
-              }
-              this.removeErrorBox(imgEl);
-              imgEl.classList?.remove('gitlab-img-error');
-              imgEl.classList?.add('gitlab-img-loading');
-              if (imgEl.dataset) {
-                delete imgEl.dataset.gitlabError;
-              }
-              retryCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
-            });
+            this.renderStatusBox(imgEl, 'Failed to load image', true, triggerReload);
           }
         }
       },
@@ -244,19 +252,27 @@ export class OnDemandImageLoader {
     let loadCleanup: (() => void) | null = null;
     imgEl.classList?.add('gitlab-img-loading');
 
+    const startLoad = (): void => {
+      if (disposed || loadCleanup) {
+        return;
+      }
+      observer.disconnect();
+      loadCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
+    };
+
+    const statusBox = this.renderStatusBox(imgEl, 'Loading image...', false, startLoad);
+    const observeTarget = statusBox ?? imgEl;
+
     const observer = new ObserverCtor(
       (entries) => {
         if (disposed) {
           return;
         }
         for (const entry of entries) {
-          const matchesTarget = !entry.target || entry.target === imgEl;
+          const matchesTarget = !entry.target || entry.target === observeTarget;
           const visible = entry.isIntersecting || (entry.intersectionRatio ?? 0) > 0;
           if (matchesTarget && visible) {
-            observer.disconnect();
-            if (!loadCleanup) {
-              loadCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
-            }
+            startLoad();
             break;
           }
         }
@@ -271,13 +287,14 @@ export class OnDemandImageLoader {
       disposed = true;
       this.activeCleanups.delete(cleanup);
       imgEl.classList?.remove('gitlab-img-loading');
+      this.removeErrorBox(imgEl);
       observer.disconnect();
       loadCleanup?.();
       loadCleanup = null;
     };
 
     this.activeCleanups.add(cleanup);
-    observer.observe(imgEl);
+    observer.observe(observeTarget);
     return cleanup;
   }
 
@@ -485,9 +502,14 @@ export class OnDemandImageLoader {
     }
   }
 
-  private renderErrorBox(imgEl: HTMLImageElement, onReload: () => void): void {
+  private renderStatusBox(
+    imgEl: HTMLImageElement,
+    message: string,
+    isError: boolean,
+    onReload: () => void,
+  ): HTMLElement | null {
     if (typeof document === 'undefined' || !imgEl.parentElement) {
-      return;
+      return null;
     }
 
     this.removeErrorBox(imgEl);
@@ -498,11 +520,11 @@ export class OnDemandImageLoader {
     }
 
     const box = document.createElement('div');
-    box.className = 'gitlab-img-error-box';
+    box.className = isError ? 'gitlab-img-error-box' : 'gitlab-img-status-box';
 
     const textEl = document.createElement('span');
     textEl.className = 'gitlab-img-error-text';
-    textEl.textContent = 'Failed to load image';
+    textEl.textContent = message;
     box.appendChild(textEl);
 
     const reloadBtn = document.createElement('button');
@@ -537,6 +559,7 @@ export class OnDemandImageLoader {
       imgEl.parentElement.appendChild(box);
     }
     this.errorBoxes.set(imgEl, box);
+    return box;
   }
 
   private removeErrorBox(imgEl: HTMLImageElement): void {

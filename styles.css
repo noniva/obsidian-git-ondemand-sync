@@ -34,6 +34,7 @@
   background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
 }
 
+.gitlab-img-status-box,
 .gitlab-img-error-box {
   display: inline-flex;
   align-items: center;
@@ -44,6 +45,12 @@
   color: var(--text-error);
   font-size: var(--font-ui-small);
   background-color: var(--background-modifier-error-hover, rgba(255, 0, 0, 0.08));
+}
+
+.gitlab-img-status-box {
+  border-color: var(--background-modifier-border);
+  color: var(--text-muted);
+  background-color: var(--background-secondary);
 }
 
 .gitlab-img-reload-btn {

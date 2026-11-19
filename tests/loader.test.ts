@@ -595,16 +595,18 @@ describe('OnDemandImageLoader', () => {
     expect(reloadBtn).not.toBeNull();
     expect(reloadBtn.textContent).toContain('Reload');
 
-    // Click Reload -> removes error box, restores display, and starts retry
+    // Click Reload -> removes error box, shows loading status box, and starts retry
     reloadBtn.click();
     expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
-    expect(imgEl.style.display).toBe('inline');
+    expect(container.querySelector('.gitlab-img-status-box')).not.toBeNull();
     expect(imgEl.classList.contains('gitlab-img-error')).toBe(false);
     expect(imgEl.classList.contains('gitlab-img-loading')).toBe(true);
 
     resolveRetry(new Uint8Array([1, 2, 3]).buffer);
     await vi.waitFor(() => expect(imgEl.src).toBe('blob:reloaded'));
     expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
+    expect(container.querySelector('.gitlab-img-status-box')).toBeNull();
+    expect(imgEl.style.display).toBe('inline');
     cleanup();
 
     // Also verify cleanup() removes visible error box
@@ -614,5 +616,43 @@ describe('OnDemandImageLoader', () => {
     await vi.waitFor(() => expect(container.querySelector('.gitlab-img-error-box')).not.toBeNull());
     cleanup2();
     expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
+  });
+
+  it('observeAndLoad shows loading status box with Reload button that triggers immediate load', async () => {
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class MockIntersectionObserver {
+      constructor(_cb: (entries: IntersectionObserverEntry[]) => void) {}
+      observe = observe;
+      disconnect = disconnect;
+      unobserve = vi.fn();
+    }
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver);
+
+    const container = document.createElement('span');
+    const imgEl = document.createElement('img');
+    container.appendChild(imgEl);
+
+    const client = { getRawBinary: vi.fn().mockResolvedValue(new Uint8Array([7]).buffer) } as any;
+    const blobApi = {
+      createObjectURL: vi.fn().mockReturnValue('blob:manual-trigger'),
+      revokeObjectURL: vi.fn(),
+    };
+    const loader = new OnDemandImageLoader(client, blobApi, 3);
+
+    const cleanup = loader.observeAndLoad(imgEl, 'attachments/lazy.png', 'main');
+    const statusBox = container.querySelector('.gitlab-img-status-box');
+    expect(statusBox).not.toBeNull();
+    expect(observe).toHaveBeenCalledWith(statusBox);
+    expect(client.getRawBinary).not.toHaveBeenCalled();
+
+    const reloadBtn = statusBox!.querySelector<HTMLButtonElement>('.gitlab-img-reload-btn')!;
+    expect(reloadBtn).not.toBeNull();
+    reloadBtn.click();
+
+    expect(disconnect).toHaveBeenCalled();
+    await vi.waitFor(() => expect(imgEl.src).toBe('blob:manual-trigger'));
+    expect(container.querySelector('.gitlab-img-status-box')).toBeNull();
+    cleanup();
   });
 });
