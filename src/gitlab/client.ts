@@ -1,38 +1,20 @@
 import { requestUrl } from 'obsidian';
-import type { GitLabCommitAction, GitLabTreeEntry } from '../types';
+import {
+  getHeaderCaseInsensitive,
+  sendRemoteRequest,
+  type RemoteClientConfig,
+  type RequestUrlFn,
+  type RequestUrlResponse,
+} from '../remote/http';
+import type {
+  CreateCommitParams,
+  RemoteCommitAction,
+  RemoteGitClient,
+  RemoteTreeEntry,
+} from '../types';
 
-export interface RequestUrlResponse {
-  status: number;
-  text: string;
-  arrayBuffer: ArrayBuffer;
-  json: unknown;
-  headers: Record<string, string>;
-}
-
-export type RequestUrlFn = (req: {
-  url: string;
-  method?: string;
-  headers?: Record<string, string>;
-  body?: string;
-  throw?: boolean;
-}) => Promise<RequestUrlResponse>;
-
-export interface GitLabClientConfig {
-  baseUrl: string;
-  projectId: string;
-  token: string;
-  timeoutMs?: number;
-  maxRateLimitRetries?: number;
-  sleep?: (ms: number) => Promise<void>;
-  onRateLimitWait?: (info: { waitMs: number; attempt: number; maxAttempts: number }) => void;
-}
-
-export interface CreateCommitParams {
-  branch: string;
-  commitMessage: string;
-  actions: GitLabCommitAction[];
-  startSha?: string;
-}
+export type { CreateCommitParams, RequestUrlFn, RequestUrlResponse };
+export type GitLabClientConfig = RemoteClientConfig;
 
 const GRAPHQL_RAW_TEXTS_QUERY = `
   query($fullPath: ID!, $ref: String!, $paths: [String!]!) {
@@ -49,20 +31,10 @@ const GRAPHQL_RAW_TEXTS_QUERY = `
   }
 `;
 
-function getHeaderCaseInsensitive(headers: Record<string, string>, name: string): string | undefined {
-  const target = name.toLowerCase();
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === target) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Minimal GitLab REST & GraphQL API client backed by an injectable Obsidian `requestUrl`-compatible function.
  */
-export class GitLabClient {
+export class GitLabClient implements RemoteGitClient {
   private readonly baseUrl: string;
   private readonly projectId: string;
   private readonly encodedProjectId: string;
@@ -113,8 +85,8 @@ export class GitLabClient {
   async getTreeRecursive(
     ref: string,
     onPage?: (info: { page: number; totalPages?: number; entries: number }) => void,
-  ): Promise<GitLabTreeEntry[]> {
-    const entries: GitLabTreeEntry[] = [];
+  ): Promise<RemoteTreeEntry[]> {
+    const entries: RemoteTreeEntry[] = [];
     const encodedRef = encodeURIComponent(ref);
     const seenPages = new Set<string>(['1']);
     let page = '1';
@@ -126,7 +98,7 @@ export class GitLabClient {
       if (!Array.isArray(res.json)) {
         throw new Error('GitLab API returned unexpected non-array response for repository tree');
       }
-      entries.push(...(res.json as GitLabTreeEntry[]));
+      entries.push(...(res.json as RemoteTreeEntry[]));
 
       const rawTotalPages = getHeaderCaseInsensitive(res.headers, 'x-total-pages')?.trim();
       const parsedTotal = rawTotalPages ? Number(rawTotalPages) : Number.NaN;
@@ -236,7 +208,7 @@ export class GitLabClient {
     const payload: {
       branch: string;
       commit_message: string;
-      actions: GitLabCommitAction[];
+      actions: RemoteCommitAction[];
       start_sha?: string;
     } = {
       branch: params.branch,
@@ -300,39 +272,6 @@ export class GitLabClient {
     return null;
   }
 
-  private parseRateLimitDelayMs(headers: Record<string, string>, attempt: number): number {
-    let delayMs: number | undefined;
-
-    const rawRetryAfter = getHeaderCaseInsensitive(headers, 'retry-after')?.trim();
-    if (rawRetryAfter) {
-      const seconds = Number(rawRetryAfter);
-      if (Number.isFinite(seconds) && seconds >= 0) {
-        delayMs = Math.ceil(seconds * 1000) + 250;
-      } else {
-        const parsedDate = Date.parse(rawRetryAfter);
-        if (Number.isFinite(parsedDate)) {
-          delayMs = parsedDate - Date.now() + 250;
-        }
-      }
-    }
-
-    if (delayMs === undefined) {
-      const rawReset = getHeaderCaseInsensitive(headers, 'ratelimit-reset')?.trim();
-      if (rawReset) {
-        const epochSec = Number(rawReset);
-        if (Number.isFinite(epochSec)) {
-          delayMs = Math.ceil(epochSec * 1000 - Date.now()) + 500;
-        }
-      }
-    }
-
-    if (delayMs !== undefined && Number.isFinite(delayMs)) {
-      return Math.min(65_000, Math.max(1_000, delayMs));
-    }
-
-    return Math.min(60_000, 5_000 * 2 ** (attempt - 1));
-  }
-
   private fetchRawFile(filePath: string, ref: string): Promise<RequestUrlResponse> {
     const encodedPath = encodeURIComponent(filePath);
     const encodedRef = encodeURIComponent(ref);
@@ -355,63 +294,26 @@ export class GitLabClient {
     return res;
   }
 
-  private async sendRequest(
+  private sendRequest(
     url: string,
     label: string,
     options: { method?: string; headers?: Record<string, string>; body?: string } = {}
   ): Promise<RequestUrlResponse> {
     const method = options.method ?? 'GET';
-
-    for (let attempt = 0; attempt <= this.maxRateLimitRetries; attempt++) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let timedOut = false;
-      let res: RequestUrlResponse;
-      try {
-        const timeoutPromise = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true;
-            reject(new Error(`GitLab API ${method} ${label} timed out after ${this.timeoutMs}ms`));
-          }, this.timeoutMs);
-        });
-        res = await Promise.race([
-          this.requestFn({
-            url,
-            method,
-            headers: {
-              'PRIVATE-TOKEN': this.token,
-              ...options.headers,
-            },
-            ...(options.body !== undefined ? { body: options.body } : {}),
-            throw: false,
-          }),
-          timeoutPromise,
-        ]);
-      } catch (err) {
-        if (timedOut) {
-          throw err;
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`GitLab API ${method} ${label} request failed: ${message}`, { cause: err });
-      } finally {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-        }
-      }
-
-      if (res.status === 429 && attempt < this.maxRateLimitRetries) {
-        const waitMs = this.parseRateLimitDelayMs(res.headers ?? {}, attempt + 1);
-        this.onRateLimitWait?.({
-          waitMs,
-          attempt: attempt + 1,
-          maxAttempts: this.maxRateLimitRetries,
-        });
-        await this.sleep(waitMs);
-        continue;
-      }
-
-      return res;
-    }
-
-    throw new Error(`GitLab API ${method} ${label} exceeded max rate-limit retries`);
+    return sendRemoteRequest({
+      requestFn: this.requestFn,
+      url,
+      label: `GitLab API ${method} ${label}`,
+      method,
+      headers: {
+        'PRIVATE-TOKEN': this.token,
+        ...options.headers,
+      },
+      body: options.body,
+      timeoutMs: this.timeoutMs,
+      maxRateLimitRetries: this.maxRateLimitRetries,
+      sleep: this.sleep,
+      onRateLimitWait: this.onRateLimitWait,
+    });
   }
 }

@@ -60,8 +60,8 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
       .setDesc('Base URL of your GitLab instance (e.g. https://gitlab.com).')
       .addText((text) =>
         text
-          .setPlaceholder(DEFAULT_SETTINGS.gitlabUrl)
-          .setValue(this.plugin.settings.gitlabUrl)
+          .setPlaceholder(DEFAULT_SETTINGS.gitlabUrl ?? DEFAULT_SETTINGS.apiUrl)
+          .setValue(this.plugin.settings.gitlabUrl ?? '')
           .onChange((value) => {
             this.plugin.settings.gitlabUrl = value.trim() || DEFAULT_SETTINGS.gitlabUrl;
             this.scheduleTextSave();

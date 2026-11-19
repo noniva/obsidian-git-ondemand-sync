@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { GitLabClient } from '../src/gitlab/client';
+import { sendRemoteRequest } from '../src/remote/http';
 
 describe('GitLabClient', () => {
   const cfg = { baseUrl: 'https://gitlab.com/', projectId: 'user/my-vault', token: 'glpat-123' };
@@ -454,5 +455,74 @@ describe('GitLabClient', () => {
     await expect(exhaustedClient.getBranchHead('main')).rejects.toThrow(/429/);
     expect(exhaustedReq).toHaveBeenCalledTimes(3);
     expect(exhaustedSleep).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('sendRemoteRequest', () => {
+  it('retries 403 rate limits only when shouldRetryRateLimit returns true and does not retry non-rate-limit 403', async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const waits: Array<{ waitMs: number; attempt: number; maxAttempts: number }> = [];
+
+    const rateLimitReq = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 403,
+        text: 'API rate limit exceeded',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: { 'x-ratelimit-remaining': '0', 'retry-after': '2' },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: 'ok',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: {},
+      });
+
+    const retriedRes = await sendRemoteRequest({
+      requestFn: rateLimitReq,
+      url: 'https://api.github.com/repos/owner/repo',
+      label: 'GET /repos/owner/repo',
+      headers: { Authorization: 'Bearer tok' },
+      timeoutMs: 5000,
+      maxRateLimitRetries: 2,
+      sleep,
+      shouldRetryRateLimit: (res) =>
+        res.status === 429 ||
+        (res.status === 403 && res.headers['x-ratelimit-remaining'] === '0'),
+      onRateLimitWait: (info) => waits.push(info),
+    });
+
+    expect(retriedRes.status).toBe(200);
+    expect(rateLimitReq).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2250);
+    expect(waits).toEqual([{ waitMs: 2250, attempt: 1, maxAttempts: 2 }]);
+
+    const nonRateLimitSleep = vi.fn().mockResolvedValue(undefined);
+    const nonRateLimitReq = vi.fn().mockResolvedValue({
+      status: 403,
+      text: 'Forbidden: bad credentials',
+      arrayBuffer: new ArrayBuffer(0),
+      json: {},
+      headers: { 'x-ratelimit-remaining': '59' },
+    });
+
+    const nonRetriedRes = await sendRemoteRequest({
+      requestFn: nonRateLimitReq,
+      url: 'https://api.github.com/repos/owner/repo',
+      label: 'GET /repos/owner/repo',
+      headers: { Authorization: 'Bearer tok' },
+      timeoutMs: 5000,
+      maxRateLimitRetries: 2,
+      sleep: nonRateLimitSleep,
+      shouldRetryRateLimit: (res) =>
+        res.status === 429 ||
+        (res.status === 403 && res.headers['x-ratelimit-remaining'] === '0'),
+    });
+
+    expect(nonRetriedRes.status).toBe(403);
+    expect(nonRateLimitReq).toHaveBeenCalledTimes(1);
+    expect(nonRateLimitSleep).not.toHaveBeenCalled();
   });
 });

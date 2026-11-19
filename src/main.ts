@@ -148,7 +148,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
   private createClient(): GitLabClient {
     return new GitLabClient({
-      baseUrl: this.settings.gitlabUrl,
+      baseUrl: this.settings.gitlabUrl ?? this.settings.apiUrl,
       projectId: this.settings.projectId,
       token: this.settings.token,
       onRateLimitWait: ({ waitMs, attempt, maxAttempts }) => {

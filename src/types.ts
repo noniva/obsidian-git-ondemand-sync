@@ -1,5 +1,9 @@
+export type GitProvider = 'github' | 'gitlab';
+
 export interface PluginSettings {
-  gitlabUrl: string;
+  provider: GitProvider;
+  apiUrl: string;
+  gitlabUrl?: string;
   projectId: string;
   branch: string;
   token: string;
@@ -8,10 +12,13 @@ export interface PluginSettings {
   attachmentFolder: string;
   autoSyncOnOpen: boolean;
   enableOnDesktop: boolean;
+  enablePersistentImageCache: boolean;
+  maxImageCacheMb: number;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
-  gitlabUrl: 'https://gitlab.com',
+  provider: 'github',
+  apiUrl: 'https://api.github.com',
   projectId: '',
   branch: 'main',
   token: '',
@@ -20,6 +27,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   attachmentFolder: 'attachments',
   autoSyncOnOpen: false,
   enableOnDesktop: false,
+  enablePersistentImageCache: true,
+  maxImageCacheMb: 50,
 };
 
 export interface SyncedFileEntry {
@@ -36,7 +45,7 @@ export interface SyncState {
   conflictDeletedPaths?: string[];
 }
 
-export interface GitLabTreeEntry {
+export interface RemoteTreeEntry {
   id: string;
   name: string;
   type: 'blob' | 'tree';
@@ -44,9 +53,32 @@ export interface GitLabTreeEntry {
   mode: string;
 }
 
-export interface GitLabCommitAction {
+export type GitLabTreeEntry = RemoteTreeEntry;
+
+export interface RemoteCommitAction {
   action: 'create' | 'update' | 'delete';
   file_path: string;
   content?: string;
   encoding?: 'text' | 'base64';
+}
+
+export type GitLabCommitAction = RemoteCommitAction;
+
+export interface CreateCommitParams {
+  branch: string;
+  commitMessage: string;
+  actions: RemoteCommitAction[];
+  startSha?: string;
+}
+
+export interface RemoteGitClient {
+  getBranchHead(branch: string): Promise<string>;
+  getTreeRecursive(
+    ref: string,
+    onPage?: (info: { page: number; totalPages?: number; entries: number }) => void,
+  ): Promise<RemoteTreeEntry[]>;
+  getRawText(filePath: string, ref: string): Promise<string>;
+  getRawTextsBatch?(filePaths: string[], ref: string): Promise<Map<string, string>>;
+  getRawBinary(filePath: string, ref: string): Promise<ArrayBuffer>;
+  createCommit(params: CreateCommitParams): Promise<string>;
 }
