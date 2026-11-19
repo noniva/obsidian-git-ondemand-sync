@@ -10,7 +10,12 @@
 }
 
 .gitlab-img-loading {
+  display: inline-block;
+  min-width: 48px;
+  min-height: 32px;
   opacity: 0.6;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
 }
 
 .gitlab-img-loaded {

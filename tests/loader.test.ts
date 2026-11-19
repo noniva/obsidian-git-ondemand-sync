@@ -381,4 +381,29 @@ describe('OnDemandImageLoader', () => {
     await vi.waitFor(() => expect(netImgs[3].src).toMatch(/^blob:lru-/));
     expect(maxInFlight).toBe(3);
   });
+
+  it('observeAndLoad adds loading placeholder class before observing with 200px rootMargin', () => {
+    let capturedOptions: IntersectionObserverInit | undefined;
+    class MockIntersectionObserver {
+      constructor(_cb: (entries: IntersectionObserverEntry[]) => void, options?: IntersectionObserverInit) {
+        capturedOptions = options;
+      }
+      observe = vi.fn();
+      disconnect = vi.fn();
+      unobserve = vi.fn();
+    }
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver);
+
+    const client = { getRawBinary: vi.fn() } as any;
+    const blobApi = { createObjectURL: vi.fn(), revokeObjectURL: vi.fn() };
+    const imgEl = createMockImg();
+    const loader = new OnDemandImageLoader(client, blobApi, 3);
+
+    const cleanup = loader.observeAndLoad(imgEl, 'attachments/pic.png', 'main');
+    expect(imgEl.classList.add).toHaveBeenCalledWith('gitlab-img-loading');
+    expect(capturedOptions).toEqual({ rootMargin: '200px 0px' });
+
+    cleanup();
+    expect(imgEl.classList.remove).toHaveBeenCalledWith('gitlab-img-loading');
+  });
 });

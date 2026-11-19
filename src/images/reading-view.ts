@@ -86,8 +86,12 @@ export function registerReadingViewImageProcessor(
     const noteDir = getNoteDir(mdCtx.sourcePath);
     const { ref, fallbackRef } = getActiveRefs(ctx);
 
-    const embeds = el.querySelectorAll<HTMLElement>('.internal-embed');
-    for (const embedEl of Array.from(embeds)) {
+    const embeds: HTMLElement[] = [];
+    if (el.matches?.('.internal-embed')) {
+      embeds.push(el);
+    }
+    embeds.push(...Array.from(el.querySelectorAll<HTMLElement>('.internal-embed')));
+    for (const embedEl of embeds) {
       if (embedEl.dataset.gitlabProcessed === 'true') {
         continue;
       }
@@ -126,8 +130,12 @@ export function registerReadingViewImageProcessor(
       mdCtx.addChild(new GitLabImageRenderChild(embedEl, cleanup));
     }
 
-    const images = el.querySelectorAll<HTMLImageElement>('img');
-    for (const imgEl of Array.from(images)) {
+    const images: HTMLImageElement[] = [];
+    if (el.matches?.('img')) {
+      images.push(el as HTMLImageElement);
+    }
+    images.push(...Array.from(el.querySelectorAll<HTMLImageElement>('img')));
+    for (const imgEl of images) {
       if (
         imgEl.dataset.gitlabProcessed === 'true' ||
         imgEl.dataset.gitlabSrc ||

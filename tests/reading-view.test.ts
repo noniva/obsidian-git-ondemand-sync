@@ -226,4 +226,30 @@ describe('registerReadingViewImageProcessor', () => {
     children[0].onunload();
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:rv-1');
   });
+
+  it('processes a root element that is itself an .internal-embed', async () => {
+    const observeAndLoad = vi.fn().mockReturnValue(vi.fn());
+    const ctx: ImageRenderContext = {
+      settings: { ...DEFAULT_SETTINGS },
+      state: {
+        lastSyncedCommitSha: 'c1',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: ['Asset/pic.png'],
+      },
+      loader: { observeAndLoad } as unknown as OnDemandImageLoader,
+      isLocalFilePresent: () => false,
+      isEnabled: () => true,
+    };
+
+    const runProcessor = setupPostProcessor(() => ctx);
+    const embedEl = document.createElement('span');
+    embedEl.className = 'internal-embed is-unresolved';
+    embedEl.setAttribute('src', 'pic.png');
+
+    const { children } = await runProcessor(embedEl);
+    expect(children).toHaveLength(1);
+    expect(observeAndLoad).toHaveBeenCalledTimes(1);
+    expect(observeAndLoad).toHaveBeenCalledWith(expect.any(HTMLImageElement), 'Asset/pic.png', 'main', undefined);
+  });
 });

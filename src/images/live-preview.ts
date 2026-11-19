@@ -1,5 +1,5 @@
 import { syntaxTree } from '@codemirror/language';
-import { RangeSetBuilder, StateEffect, type Extension } from '@codemirror/state';
+import { Prec, RangeSetBuilder, StateEffect, type Extension } from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
@@ -247,35 +247,37 @@ function buildDecorations(view: EditorView, getContext: () => ImageRenderContext
  * image embeds inline in Live Preview when the cursor is outside the embed syntax.
  */
 export function createLivePreviewImageExtension(getContext: () => ImageRenderContext): Extension {
-  return ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
+  return Prec.highest(
+    ViewPlugin.fromClass(
+      class {
+        decorations: DecorationSet;
 
-      constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, getContext);
-      }
-
-      update(update: ViewUpdate): void {
-        const livePreviewChanged =
-          update.startState.field(editorLivePreviewField, false) !==
-          update.state.field(editorLivePreviewField, false);
-        const refreshRequested = update.transactions.some((tr) =>
-          tr.effects.some((e) => e.is(refreshRemoteImagesEffect)),
-        );
-
-        if (
-          update.docChanged ||
-          update.viewportChanged ||
-          update.selectionSet ||
-          livePreviewChanged ||
-          refreshRequested
-        ) {
-          this.decorations = buildDecorations(update.view, getContext);
+        constructor(view: EditorView) {
+          this.decorations = buildDecorations(view, getContext);
         }
-      }
-    },
-    {
-      decorations: (plugin) => plugin.decorations,
-    },
+
+        update(update: ViewUpdate): void {
+          const livePreviewChanged =
+            update.startState.field(editorLivePreviewField, false) !==
+            update.state.field(editorLivePreviewField, false);
+          const refreshRequested = update.transactions.some((tr) =>
+            tr.effects.some((e) => e.is(refreshRemoteImagesEffect)),
+          );
+
+          if (
+            update.docChanged ||
+            update.viewportChanged ||
+            update.selectionSet ||
+            livePreviewChanged ||
+            refreshRequested
+          ) {
+            this.decorations = buildDecorations(update.view, getContext);
+          }
+        }
+      },
+      {
+        decorations: (plugin) => plugin.decorations,
+      },
+    ),
   );
 }

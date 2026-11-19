@@ -182,23 +182,27 @@ export class OnDemandImageLoader {
 
     let disposed = false;
     let loadCleanup: (() => void) | null = null;
+    imgEl.classList?.add('gitlab-img-loading');
 
-    const observer = new ObserverCtor((entries) => {
-      if (disposed) {
-        return;
-      }
-      for (const entry of entries) {
-        const matchesTarget = !entry.target || entry.target === imgEl;
-        const visible = entry.isIntersecting || (entry.intersectionRatio ?? 0) > 0;
-        if (matchesTarget && visible) {
-          observer.disconnect();
-          if (!loadCleanup) {
-            loadCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
-          }
-          break;
+    const observer = new ObserverCtor(
+      (entries) => {
+        if (disposed) {
+          return;
         }
-      }
-    });
+        for (const entry of entries) {
+          const matchesTarget = !entry.target || entry.target === imgEl;
+          const visible = entry.isIntersecting || (entry.intersectionRatio ?? 0) > 0;
+          if (matchesTarget && visible) {
+            observer.disconnect();
+            if (!loadCleanup) {
+              loadCleanup = this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
+            }
+            break;
+          }
+        }
+      },
+      { rootMargin: '200px 0px' },
+    );
 
     const cleanup = (): void => {
       if (disposed) {
@@ -206,6 +210,7 @@ export class OnDemandImageLoader {
       }
       disposed = true;
       this.activeCleanups.delete(cleanup);
+      imgEl.classList?.remove('gitlab-img-loading');
       observer.disconnect();
       loadCleanup?.();
       loadCleanup = null;
