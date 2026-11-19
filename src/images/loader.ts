@@ -106,15 +106,8 @@ export class OnDemandImageLoader {
     fallbackRef?: string,
   ): () => void {
     const cacheKey = normalizeVaultPath(repoPath);
-    const cached = this.memoryImages.get(cacheKey);
-    if (
-      cached &&
-      (cached.ref === undefined ||
-        cached.ref === ref ||
-        (fallbackRef !== undefined && cached.ref === fallbackRef))
-    ) {
-      this.memoryImages.delete(cacheKey);
-      this.memoryImages.set(cacheKey, cached);
+    const cached = this.findTier1Hit(cacheKey, ref, fallbackRef);
+    if (cached) {
       this.applyLoadedUrl(imgEl, repoPath, cached.url);
       return () => {};
     }
@@ -130,6 +123,12 @@ export class OnDemandImageLoader {
       cancelled: false,
       run: async () => {
         try {
+          const existingHit = this.findTier1Hit(cacheKey, ref, fallbackRef);
+          if (existingHit) {
+            this.applyLoadedUrl(imgEl, repoPath, existingHit.url);
+            return;
+          }
+
           if (this.isPersistentCacheActive()) {
             const tier2Hit = await this.tryLoadFromPersistentCache(cacheKey, ref, fallbackRef);
             if (task.cancelled) {
@@ -327,6 +326,25 @@ export class OnDemandImageLoader {
     this.memoryImages.clear();
   }
 
+  private findTier1Hit(
+    cacheKey: string,
+    ref: string,
+    fallbackRef?: string,
+  ): MemoryCacheEntry | null {
+    const cached = this.memoryImages.get(cacheKey);
+    if (
+      !cached ||
+      (cached.ref !== undefined &&
+        cached.ref !== ref &&
+        (fallbackRef === undefined || cached.ref !== fallbackRef))
+    ) {
+      return null;
+    }
+    this.memoryImages.delete(cacheKey);
+    this.memoryImages.set(cacheKey, cached);
+    return cached;
+  }
+
   private storeMemoryImage(cacheKey: string, url: string, ref?: string): void {
     const previous = this.memoryImages.get(cacheKey);
     if (previous) {
@@ -502,7 +520,15 @@ export class OnDemandImageLoader {
     labelEl.textContent = 'Reload';
     reloadBtn.appendChild(labelEl);
 
-    reloadBtn.addEventListener('click', onReload);
+    const stopEditorPointer = (ev: Event): void => {
+      ev.stopPropagation();
+    };
+    reloadBtn.addEventListener('mousedown', stopEditorPointer);
+    reloadBtn.addEventListener('touchstart', stopEditorPointer);
+    reloadBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      onReload();
+    });
     box.appendChild(reloadBtn);
 
     if (typeof imgEl.after === 'function') {

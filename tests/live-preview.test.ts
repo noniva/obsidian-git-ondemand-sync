@@ -319,4 +319,51 @@ describe('createLivePreviewImageExtension', () => {
     view.destroy();
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
+
+  it('reloads a failed image in Live Preview without expanding raw markdown on mousedown + click', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    const blobApi = {
+      createObjectURL: vi.fn().mockReturnValue('blob:lp-reloaded'),
+      revokeObjectURL: vi.fn(),
+    };
+    const client = {
+      getRawBinary: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('502 Bad Gateway'))
+        .mockResolvedValueOnce(new Uint8Array([1, 2, 3]).buffer),
+    };
+    const loader = new OnDemandImageLoader(client, blobApi, 3);
+    const ctx: ImageRenderContext = {
+      settings: { ...DEFAULT_SETTINGS },
+      state: {
+        lastSyncedCommitSha: 'c1',
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: ['attachments/pic.png'],
+      },
+      loader,
+      isLocalFilePresent: () => false,
+      isEnabled: () => true,
+    };
+
+    const view = mountEditor('Intro\n![[pic.png]]', () => ctx, { cursor: 0 });
+    const reloadBtn = await vi.waitFor(() => {
+      const btn = view.dom.querySelector<HTMLButtonElement>('.gitlab-img-reload-btn');
+      if (!btn) {
+        throw new Error('Reload button not rendered yet');
+      }
+      return btn;
+    });
+
+    reloadBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    reloadBtn.click();
+
+    await vi.waitFor(() => {
+      const img = view.dom.querySelector<HTMLImageElement>('.gitlab-ondemand-img');
+      expect(img?.src).toBe('blob:lp-reloaded');
+    });
+    expect(view.dom.querySelector('.gitlab-img-error-box')).toBeNull();
+    expect(client.getRawBinary).toHaveBeenCalledTimes(2);
+    expect(view.state.selection.main.head).toBe(0);
+  });
 });
