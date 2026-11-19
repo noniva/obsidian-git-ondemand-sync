@@ -15,6 +15,7 @@
     "mobile",
     "images"
   ],
+  "author": "Noniva",
   "license": "MIT",
   "devDependencies": {
     "@codemirror/language": "^6.10.0",
