@@ -586,7 +586,7 @@ describe('OnDemandImageLoader', () => {
     const cleanup = loader.loadIntoElement(imgEl, 'attachments/flaky.png', 'main');
 
     await vi.waitFor(() => expect(container.querySelector('.gitlab-img-error-box')).not.toBeNull());
-    expect(imgEl.style.display).toBe('none');
+    expect(imgEl.classList.contains('gitlab-img-hidden')).toBe(true);
     expect(imgEl.classList.contains('gitlab-img-error')).toBe(true);
 
     const errorBox = container.querySelector('.gitlab-img-error-box')!;
@@ -606,6 +606,7 @@ describe('OnDemandImageLoader', () => {
     await vi.waitFor(() => expect(imgEl.src).toBe('blob:reloaded'));
     expect(container.querySelector('.gitlab-img-error-box')).toBeNull();
     expect(container.querySelector('.gitlab-img-status-box')).toBeNull();
+    expect(imgEl.classList.contains('gitlab-img-hidden')).toBe(false);
     expect(imgEl.style.display).toBe('inline');
     cleanup();
 

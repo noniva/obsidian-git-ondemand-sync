@@ -9,6 +9,10 @@
   height: auto;
 }
 
+.gitlab-img-hidden {
+  display: none;
+}
+
 .gitlab-img-loading {
   display: inline-block;
   min-width: 48px;

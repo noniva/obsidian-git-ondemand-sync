@@ -76,7 +76,6 @@ export class OnDemandImageLoader {
   private readonly memoryImages = new Map<string, MemoryCacheEntry>();
   private readonly activeCleanups = new Set<() => void>();
   private readonly errorBoxes = new WeakMap<HTMLImageElement, HTMLElement>();
-  private readonly savedDisplay = new WeakMap<HTMLImageElement, string>();
   private readonly imgErrorCleanups = new WeakMap<HTMLImageElement, () => void>();
   private activeCount = 0;
 
@@ -556,11 +555,7 @@ export class OnDemandImageLoader {
     }
 
     this.removeErrorBox(imgEl);
-
-    if (imgEl.style) {
-      this.savedDisplay.set(imgEl, imgEl.style.display ?? '');
-      imgEl.style.display = 'none';
-    }
+    imgEl.classList?.add('gitlab-img-hidden');
 
     const box = document.createElement('div');
     box.className = isError ? 'gitlab-img-error-box' : 'gitlab-img-status-box';
@@ -611,10 +606,7 @@ export class OnDemandImageLoader {
       existing.remove();
       this.errorBoxes.delete(imgEl);
     }
-    if (imgEl.style && this.savedDisplay.has(imgEl)) {
-      imgEl.style.display = this.savedDisplay.get(imgEl) ?? '';
-      this.savedDisplay.delete(imgEl);
-    }
+    imgEl.classList?.remove('gitlab-img-hidden');
   }
 
   private applyLoadedUrl(

@@ -107,8 +107,7 @@ describe('createLivePreviewImageExtension', () => {
 
     const img1 = embeds[1].querySelector('img')!;
     expect(img1.alt).toBe('Diagram alt');
-    expect(img1.style.width).toBe('240px');
-    expect(img1.style.maxWidth).toBe('100%');
+    expect(img1.getAttribute('width')).toBe('240');
 
     expect(observeAndLoad).toHaveBeenCalledTimes(2);
     expect(observeAndLoad).toHaveBeenNthCalledWith(

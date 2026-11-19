@@ -10,6 +10,7 @@ import {
 } from '@codemirror/view';
 import { editorInfoField, editorLivePreviewField } from 'obsidian';
 import {
+  applyImageWidth,
   getActiveRefs,
   getNoteDir,
   hydrateRemoteEmbed,
@@ -127,10 +128,7 @@ class RemoteImageWidget extends WidgetType {
     if (this.alt) {
       imgEl.alt = this.alt;
     }
-    if (this.width !== undefined && Number.isFinite(this.width) && this.width > 0) {
-      imgEl.style.width = `${this.width}px`;
-      imgEl.style.maxWidth = '100%';
-    }
+    applyImageWidth(imgEl, this.width);
 
     container.appendChild(imgEl);
 

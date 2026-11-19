@@ -106,6 +106,19 @@ function parseWidthAttr(raw: string | null): number | undefined {
   return parseEmbedWidth(raw);
 }
 
+/**
+ * Applies a parsed pixel width to an `<img>` element without direct `style.*` assignment.
+ */
+export function applyImageWidth(imgEl: HTMLImageElement, width?: number): void {
+  if (width !== undefined && Number.isFinite(width) && width > 0) {
+    imgEl.setAttribute('width', String(width));
+    const withCssProps = imgEl as HTMLImageElement & {
+      setCssProps?: (props: Record<string, string>) => void;
+    };
+    withCssProps.setCssProps?.({ width: `${width}px`, 'max-width': '100%' });
+  }
+}
+
 function applyImageAttributes(imgEl: HTMLImageElement, alt: string, width?: number): void {
   imgEl.classList.add('gitlab-ondemand-img');
   const trimmedAlt = alt.trim();
@@ -118,10 +131,7 @@ function applyImageAttributes(imgEl: HTMLImageElement, alt: string, width?: numb
       imgEl.alt = cleanedAlt;
     }
   }
-  if (width !== undefined && Number.isFinite(width) && width > 0) {
-    imgEl.style.width = `${width}px`;
-    imgEl.style.maxWidth = '100%';
-  }
+  applyImageWidth(imgEl, width);
 }
 
 /**
@@ -154,8 +164,8 @@ export function registerReadingViewImageProcessor(
     }
 
     const images: HTMLImageElement[] = [];
-    if (el.matches?.('img')) {
-      images.push(el as HTMLImageElement);
+    if (el instanceof HTMLImageElement) {
+      images.push(el);
     }
     images.push(...Array.from(el.querySelectorAll<HTMLImageElement>('img')));
     for (const imgEl of images) {

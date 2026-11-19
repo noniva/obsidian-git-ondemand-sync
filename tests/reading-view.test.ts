@@ -83,16 +83,15 @@ describe('registerReadingViewImageProcessor', () => {
     expect(img0).not.toBeNull();
     expect(img0.classList.contains('gitlab-ondemand-img')).toBe(true);
     expect(img0.alt).toBe('My Caption');
-    expect(img0.style.width).toBe('300px');
-    expect(img0.style.maxWidth).toBe('100%');
+    expect(img0.getAttribute('width')).toBe('300');
 
     const img1 = embeds[1].querySelector('img')!;
     expect(img1.alt).toBe('part one|part two');
-    expect(img1.style.width).toBe('420px');
+    expect(img1.getAttribute('width')).toBe('420');
 
     const img2 = embeds[2].querySelector('img')!;
     expect(img2.alt).toBe('legacy|caption');
-    expect(img2.style.width).toBe('250px');
+    expect(img2.getAttribute('width')).toBe('250');
 
     // Non-image markdown embed untouched
     expect(embeds[3].querySelector('img')).toBeNull();
@@ -138,7 +137,7 @@ describe('registerReadingViewImageProcessor', () => {
     expect(imgs[0].hasAttribute('src')).toBe(false);
     expect(imgs[0].dataset.gitlabProcessed).toBe('true');
     expect(imgs[0].alt).toBe('Revenue');
-    expect(imgs[0].style.width).toBe('280px');
+    expect(imgs[0].getAttribute('width')).toBe('280');
     expect(observeAndLoad).toHaveBeenCalledTimes(1);
     expect(observeAndLoad).toHaveBeenCalledWith(
       imgs[0],
