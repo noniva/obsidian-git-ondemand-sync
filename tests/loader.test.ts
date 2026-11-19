@@ -337,7 +337,21 @@ describe('OnDemandImageLoader', () => {
       createObjectURL: vi.fn(() => `blob:lru-${++seq}`),
       revokeObjectURL: vi.fn(),
     };
-    const client = { getRawBinary: vi.fn().mockResolvedValue(new Uint8Array([1]).buffer) } as any;
+    const resolvers = new Map<string, (buf: ArrayBuffer) => void>();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const client = {
+      getRawBinary: vi.fn((path: string) => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise<ArrayBuffer>((resolve) => {
+          resolvers.set(path, (buf) => {
+            inFlight--;
+            resolve(buf);
+          });
+        });
+      }),
+    } as any;
     const loader = new OnDemandImageLoader(client, blobApi, Number.NaN, 2);
 
     loader.registerMemoryImage('a.png', new Blob([new Uint8Array([1])]));
@@ -347,9 +361,24 @@ describe('OnDemandImageLoader', () => {
     loader.registerMemoryImage('c.png', new Blob([new Uint8Array([3])]));
 
     expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:lru-2');
-    const img = createMockImg();
-    loader.loadIntoElement(img, 'c.png', 'main');
-    expect(img.src).toBe('blob:lru-3');
+    const cachedImg = createMockImg();
+    loader.loadIntoElement(cachedImg, 'c.png', 'main');
+    expect(cachedImg.src).toBe('blob:lru-3');
     expect(client.getRawBinary).not.toHaveBeenCalled();
+
+    // Verify async drainQueue() defaults to 3 concurrent requests when maxConcurrent is NaN
+    const netImgs = Array.from({ length: 4 }, () => createMockImg());
+    netImgs.forEach((img, idx) => loader.loadIntoElement(img, `net/${idx}.png`, 'main'));
+    expect(client.getRawBinary).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(3);
+
+    resolvers.get('net/0.png')!(new Uint8Array([1]).buffer);
+    await vi.waitFor(() => expect(client.getRawBinary).toHaveBeenCalledTimes(4));
+
+    resolvers.get('net/1.png')!(new Uint8Array([2]).buffer);
+    resolvers.get('net/2.png')!(new Uint8Array([3]).buffer);
+    resolvers.get('net/3.png')!(new Uint8Array([4]).buffer);
+    await vi.waitFor(() => expect(netImgs[3].src).toMatch(/^blob:lru-/));
+    expect(maxInFlight).toBe(3);
   });
 });
