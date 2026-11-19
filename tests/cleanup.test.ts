@@ -342,4 +342,31 @@ describe('UnusedImagesModal', () => {
       expect(onConfirm).toHaveBeenCalledWith(['attachments/b.jpg']);
     });
   });
+
+  it('loads lazy thumbnail previews via loader and cleans them up on close', () => {
+    const cleanups = [vi.fn(), vi.fn()];
+    const observeAndLoad = vi
+      .fn()
+      .mockReturnValueOnce(cleanups[0])
+      .mockReturnValueOnce(cleanups[1]);
+
+    const modal = new UnusedImagesModal({} as App, {
+      branch: 'main',
+      unusedPaths: ['attachments/one.png', 'Asset/two.webp'],
+      onConfirm: vi.fn(),
+      loader: { observeAndLoad },
+    });
+
+    modal.open();
+
+    const thumbs = modal.contentEl.querySelectorAll<HTMLImageElement>('.gitlab-cleanup-thumb-img');
+    expect(thumbs).toHaveLength(2);
+    expect(observeAndLoad).toHaveBeenCalledTimes(2);
+    expect(observeAndLoad).toHaveBeenNthCalledWith(1, thumbs[0], 'attachments/one.png', 'main');
+    expect(observeAndLoad).toHaveBeenNthCalledWith(2, thumbs[1], 'Asset/two.webp', 'main');
+
+    modal.close();
+    expect(cleanups[0]).toHaveBeenCalledTimes(1);
+    expect(cleanups[1]).toHaveBeenCalledTimes(1);
+  });
 });

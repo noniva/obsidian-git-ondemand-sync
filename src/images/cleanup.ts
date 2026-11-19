@@ -7,6 +7,7 @@ import {
   normalizeVaultPath,
   resolveRemoteImagePath,
 } from '../utils/paths';
+import type { OnDemandImageLoader } from './loader';
 
 const URI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 const WIKILINK_RE = /!?\[\[([^\]]+)\]\]/g;
@@ -220,20 +221,29 @@ export interface UnusedImagesModalOptions {
   branch: string;
   unusedPaths: string[];
   onConfirm: (selectedPaths: string[]) => Promise<void> | void;
+  loader?: Pick<OnDemandImageLoader, 'observeAndLoad'>;
 }
 
 /**
- * Confirmation modal listing unused remote images with checkboxes before deletion.
+ * Confirmation modal listing unused remote images with lazy thumbnail previews and checkboxes before deletion.
  */
 export class UnusedImagesModal extends Modal {
   private readonly opts: UnusedImagesModalOptions;
+  private readonly thumbCleanups: Array<() => void> = [];
 
   constructor(app: App, opts: UnusedImagesModalOptions) {
     super(app);
     this.opts = opts;
   }
 
+  private clearThumbCleanups(): void {
+    while (this.thumbCleanups.length > 0) {
+      this.thumbCleanups.pop()?.();
+    }
+  }
+
   onOpen(): void {
+    this.clearThumbCleanups();
     const { contentEl } = this;
     contentEl.empty();
 
@@ -258,8 +268,11 @@ export class UnusedImagesModal extends Modal {
 
     const checkboxes: Array<{ path: string; input: HTMLInputElement }> = [];
     for (const filePath of this.opts.unusedPaths) {
-      const itemEl = document.createElement('label');
+      const itemEl = document.createElement('div');
       itemEl.className = 'gitlab-cleanup-modal-item';
+
+      const labelEl = document.createElement('label');
+      labelEl.className = 'gitlab-cleanup-modal-label';
 
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
@@ -267,10 +280,24 @@ export class UnusedImagesModal extends Modal {
 
       const labelText = document.createElement('span');
       labelText.textContent = filePath;
+      labelEl.append(checkbox, labelText);
 
-      itemEl.append(checkbox, labelText);
+      const thumbWrap = document.createElement('div');
+      thumbWrap.className = 'gitlab-cleanup-modal-thumb';
+      const thumbImg = document.createElement('img');
+      thumbImg.className = 'gitlab-cleanup-thumb-img';
+      thumbImg.alt = filePath;
+      thumbWrap.appendChild(thumbImg);
+
+      itemEl.append(labelEl, thumbWrap);
       listEl.appendChild(itemEl);
       checkboxes.push({ path: filePath, input: checkbox });
+
+      if (this.opts.loader) {
+        this.thumbCleanups.push(
+          this.opts.loader.observeAndLoad(thumbImg, filePath, this.opts.branch),
+        );
+      }
     }
 
     const actionsEl = document.createElement('div');
@@ -340,6 +367,7 @@ export class UnusedImagesModal extends Modal {
   }
 
   onClose(): void {
+    this.clearThumbCleanups();
     this.contentEl.empty();
   }
 }

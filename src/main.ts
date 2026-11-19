@@ -220,6 +220,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     new UnusedImagesModal(this.app, {
       branch,
       unusedPaths,
+      loader: this.loader,
       onConfirm: async (selectedPaths) => {
         const deleteNotice = new Notice(
           `Deleting ${selectedPaths.length} unused image(s)...`,

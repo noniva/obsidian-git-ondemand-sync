@@ -110,10 +110,51 @@
 .gitlab-cleanup-modal-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
+  justify-content: space-between;
+  gap: 10px;
   font-size: var(--font-ui-small);
   word-break: break-all;
+}
+
+.gitlab-cleanup-modal-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.gitlab-cleanup-modal-thumb {
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background-color: var(--background-primary);
+}
+
+.gitlab-cleanup-thumb-img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  display: block;
+}
+
+.gitlab-cleanup-modal-thumb .gitlab-img-status-box,
+.gitlab-cleanup-modal-thumb .gitlab-img-error-box {
+  padding: 2px;
+  gap: 2px;
+  border-width: 0;
+  background: transparent;
+}
+
+.gitlab-cleanup-modal-thumb .gitlab-img-error-text {
+  display: none;
 }
 
 .gitlab-cleanup-modal-actions {
