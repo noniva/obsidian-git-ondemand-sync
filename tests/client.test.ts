@@ -212,4 +212,247 @@ describe('GitLabClient', () => {
       { page: 2, totalPages: 2, entries: 3 },
     ]);
   });
+
+  it('fetches batch text blobs via GraphQL and skips null rawTextBlob entries', async () => {
+    const req = vi.fn().mockResolvedValue({
+      status: 200,
+      text: '',
+      arrayBuffer: new ArrayBuffer(0),
+      headers: {},
+      json: {
+        data: {
+          project: {
+            repository: {
+              blobs: {
+                nodes: [
+                  { path: 'a.md', rawTextBlob: '# A' },
+                  { path: 'b.md', rawTextBlob: null },
+                  { path: 'notes/c.md', rawTextBlob: '# C' },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const client = new GitLabClient(cfg, req);
+    const map = await client.getRawTextsBatch(['a.md', 'b.md', 'notes/c.md'], 'sha123');
+
+    expect(Array.from(map.entries())).toEqual([
+      ['a.md', '# A'],
+      ['notes/c.md', '# C'],
+    ]);
+    expect(req).toHaveBeenCalledTimes(1);
+    expect(req.mock.calls[0][0].url).toBe('https://gitlab.com/api/graphql');
+    expect(req.mock.calls[0][0].method).toBe('POST');
+    const body = JSON.parse(req.mock.calls[0][0].body);
+    expect(body.variables).toEqual({
+      fullPath: 'user/my-vault',
+      ref: 'sha123',
+      paths: ['a.md', 'b.md', 'notes/c.md'],
+    });
+  });
+
+  it('resolves numeric projectId once via /projects/:id and caches fullPath across batch calls', async () => {
+    const req = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        headers: {},
+        json: { path_with_namespace: 'group/sub/vault' },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        headers: {},
+        json: {
+          data: {
+            project: {
+              repository: {
+                blobs: { nodes: [{ path: 'a.md', rawTextBlob: '1' }] },
+              },
+            },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        headers: {},
+        json: {
+          data: {
+            project: {
+              repository: {
+                blobs: { nodes: [{ path: 'b.md', rawTextBlob: '2' }] },
+              },
+            },
+          },
+        },
+      });
+
+    const client = new GitLabClient({ ...cfg, projectId: '42' }, req);
+    const first = await client.getRawTextsBatch(['a.md'], 'sha1');
+    const second = await client.getRawTextsBatch(['b.md'], 'sha1');
+
+    expect(first.get('a.md')).toBe('1');
+    expect(second.get('b.md')).toBe('2');
+    expect(req).toHaveBeenCalledTimes(3);
+    expect(req.mock.calls[0][0].url).toBe('https://gitlab.com/api/v4/projects/42');
+    expect(JSON.parse(req.mock.calls[1][0].body).variables.fullPath).toBe('group/sub/vault');
+    expect(JSON.parse(req.mock.calls[2][0].body).variables.fullPath).toBe('group/sub/vault');
+  });
+
+  it('returns empty Map on GraphQL 404 or malformed/error payloads and throws on 401 or exhausted 429', async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    const notFoundClient = new GitLabClient(
+      cfg,
+      vi.fn().mockResolvedValue({
+        status: 404,
+        text: 'Not Found',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: {},
+      }),
+    );
+    expect((await notFoundClient.getRawTextsBatch(['a.md'], 'sha1')).size).toBe(0);
+
+    const gqlErrorClient = new GitLabClient(
+      cfg,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        json: { errors: [{ message: 'Variable invalid' }], data: null },
+        headers: {},
+      }),
+    );
+    expect((await gqlErrorClient.getRawTextsBatch(['a.md'], 'sha1')).size).toBe(0);
+
+    const badJsonClient = new GitLabClient(
+      cfg,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        text: '<html>bad</html>',
+        arrayBuffer: new ArrayBuffer(0),
+        get json(): unknown {
+          throw new SyntaxError('Unexpected token <');
+        },
+        headers: {},
+      }),
+    );
+    expect((await badJsonClient.getRawTextsBatch(['a.md'], 'sha1')).size).toBe(0);
+
+    const unauthClient = new GitLabClient(
+      cfg,
+      vi.fn().mockResolvedValue({
+        status: 401,
+        text: 'Unauthorized',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: {},
+      }),
+    );
+    await expect(unauthClient.getRawTextsBatch(['a.md'], 'sha1')).rejects.toThrow(/401/);
+
+    const rateLimitClient = new GitLabClient(
+      { ...cfg, maxRateLimitRetries: 1, sleep },
+      vi.fn().mockResolvedValue({
+        status: 429,
+        text: 'Rate limit exceeded',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: { 'Retry-After': '1' },
+      }),
+    );
+    await expect(rateLimitClient.getRawTextsBatch(['a.md'], 'sha1')).rejects.toThrow(/429/);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries HTTP 429 using Retry-After seconds and invokes onRateLimitWait', async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const waits: Array<{ waitMs: number; attempt: number; maxAttempts: number }> = [];
+    const req = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 429,
+        text: 'Rate limit exceeded',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: { 'Retry-After': '3' },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: '# Recovered',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: {},
+      });
+
+    const client = new GitLabClient(
+      {
+        ...cfg,
+        maxRateLimitRetries: 2,
+        sleep,
+        onRateLimitWait: (info) => waits.push(info),
+      },
+      req,
+    );
+
+    const text = await client.getRawText('note.md', 'main');
+    expect(text).toBe('# Recovered');
+    expect(req).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(3250);
+    expect(waits).toEqual([{ waitMs: 3250, attempt: 1, maxAttempts: 2 }]);
+  });
+
+  it('retries HTTP 429 using RateLimit-Reset timestamp when Retry-After is absent and throws when retries exhausted', async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const futureResetSec = Math.floor(Date.now() / 1000) + 4;
+    const reqReset = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: 429,
+        text: 'Rate limit exceeded',
+        arrayBuffer: new ArrayBuffer(0),
+        json: {},
+        headers: { 'RateLimit-Reset': String(futureResetSec) },
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        json: { commit: { id: 'sha-ok' } },
+        headers: {},
+      });
+
+    const resetClient = new GitLabClient({ ...cfg, maxRateLimitRetries: 2, sleep }, reqReset);
+    await expect(resetClient.getBranchHead('main')).resolves.toBe('sha-ok');
+    expect(sleep).toHaveBeenCalledTimes(1);
+    const delayMs = sleep.mock.calls[0][0];
+    expect(delayMs).toBeGreaterThanOrEqual(1000);
+    expect(delayMs).toBeLessThanOrEqual(65000);
+
+    const exhaustedSleep = vi.fn().mockResolvedValue(undefined);
+    const exhaustedReq = vi.fn().mockResolvedValue({
+      status: 429,
+      text: 'Rate limit exceeded',
+      arrayBuffer: new ArrayBuffer(0),
+      json: {},
+      headers: {},
+    });
+    const exhaustedClient = new GitLabClient(
+      { ...cfg, maxRateLimitRetries: 2, sleep: exhaustedSleep },
+      exhaustedReq,
+    );
+
+    await expect(exhaustedClient.getBranchHead('main')).rejects.toThrow(/429/);
+    expect(exhaustedReq).toHaveBeenCalledTimes(3);
+    expect(exhaustedSleep).toHaveBeenCalledTimes(2);
+  });
 });

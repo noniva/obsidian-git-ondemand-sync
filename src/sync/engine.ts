@@ -28,13 +28,15 @@ export interface SyncProgress {
 export interface SyncEngineOptions {
   settings: PluginSettings;
   state: SyncState;
-  client: Pick<GitLabClient, 'getBranchHead' | 'getTreeRecursive' | 'getRawText' | 'createCommit'>;
+  client: Pick<GitLabClient, 'getBranchHead' | 'getTreeRecursive' | 'getRawText' | 'createCommit'> &
+    Partial<Pick<GitLabClient, 'getRawTextsBatch'>>;
   vault: VaultTextAdapter;
   saveState: () => Promise<void> | void;
   now?: () => Date;
   configDir?: string;
   onProgress?: (progress: SyncProgress) => void;
   downloadConcurrency?: number;
+  batchDownloadSize?: number;
 }
 
 function formatConflictBranchName(date: Date): string {
@@ -96,6 +98,7 @@ export class SyncEngine {
   private readonly configDir: string;
   private readonly onProgress?: (progress: SyncProgress) => void;
   private readonly downloadConcurrency: number;
+  private readonly batchDownloadSize: number;
 
   constructor(options: SyncEngineOptions) {
     this.settings = options.settings;
@@ -110,7 +113,12 @@ export class SyncEngine {
     this.downloadConcurrency =
       typeof rawConc === 'number' && Number.isFinite(rawConc)
         ? Math.max(1, Math.floor(rawConc))
-        : 6;
+        : 4;
+    const rawBatch = options.batchDownloadSize;
+    this.batchDownloadSize =
+      typeof rawBatch === 'number' && Number.isFinite(rawBatch)
+        ? Math.max(1, Math.floor(rawBatch))
+        : 50;
   }
 
   private emitProgress(progress: SyncProgress): void {
@@ -493,9 +501,9 @@ export class SyncEngine {
     const downloaded = new Map<string, string>();
 
     if (totalDownloads > 0) {
-      let nextIdx = 0;
       let completed = 0;
-      let failed = false;
+      const remainingPaths: string[] = [];
+
       this.emitProgress({
         stage: 'pulling',
         message: `Downloading notes (0/${totalDownloads})...`,
@@ -503,31 +511,64 @@ export class SyncEngine {
         total: totalDownloads,
       });
 
-      const workerCount = Math.min(this.downloadConcurrency, totalDownloads);
-      const workers = Array.from({ length: workerCount }, async () => {
-        while (!failed && nextIdx < totalDownloads) {
-          const path = plan.pullDownloads[nextIdx++];
-          try {
-            const text = await this.client.getRawText(path, headSha);
-            if (failed) {
-              return;
-            }
-            downloaded.set(path, text);
-            completed++;
-            this.emitProgress({
-              stage: 'pulling',
-              message: `Downloading notes (${completed}/${totalDownloads})...`,
-              current: completed,
-              total: totalDownloads,
-            });
-          } catch (err) {
-            failed = true;
-            throw err;
+      if (totalDownloads > 1 && typeof this.client.getRawTextsBatch === 'function') {
+        for (let i = 0; i < totalDownloads; i += this.batchDownloadSize) {
+          const chunk = plan.pullDownloads.slice(i, i + this.batchDownloadSize);
+          const batch = await this.client.getRawTextsBatch(chunk, headSha);
+          if (batch.size === 0) {
+            // GraphQL unsupported or returned no blobs; fall back to REST for this and remaining chunks.
+            remainingPaths.push(...plan.pullDownloads.slice(i));
+            break;
           }
+          for (const path of chunk) {
+            const text = batch.get(path);
+            if (text !== undefined) {
+              downloaded.set(path, text);
+              completed++;
+            } else {
+              remainingPaths.push(path);
+            }
+          }
+          this.emitProgress({
+            stage: 'pulling',
+            message: `Downloading notes (${completed}/${totalDownloads})...`,
+            current: completed,
+            total: totalDownloads,
+          });
         }
-      });
+      } else {
+        remainingPaths.push(...plan.pullDownloads);
+      }
 
-      await Promise.all(workers);
+      if (remainingPaths.length > 0) {
+        let nextIdx = 0;
+        let failed = false;
+        const workerCount = Math.min(this.downloadConcurrency, remainingPaths.length);
+        const workers = Array.from({ length: workerCount }, async () => {
+          while (!failed && nextIdx < remainingPaths.length) {
+            const path = remainingPaths[nextIdx++];
+            try {
+              const text = await this.client.getRawText(path, headSha);
+              if (failed) {
+                return;
+              }
+              downloaded.set(path, text);
+              completed++;
+              this.emitProgress({
+                stage: 'pulling',
+                message: `Downloading notes (${completed}/${totalDownloads})...`,
+                current: completed,
+                total: totalDownloads,
+              });
+            } catch (err) {
+              failed = true;
+              throw err;
+            }
+          }
+        });
+
+        await Promise.all(workers);
+      }
     }
 
     const totalWrites = downloaded.size + plan.pullDeletes.length;

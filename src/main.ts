@@ -40,6 +40,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   private client!: GitLabClient;
   private loader!: OnDemandImageLoader;
   private statusBarEl: HTMLElement | null = null;
+  private activeProgressUpdate: ((progress: SyncProgress) => void) | null = null;
   private isSyncing = false;
 
   override async onload(): Promise<void> {
@@ -150,6 +151,12 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       baseUrl: this.settings.gitlabUrl,
       projectId: this.settings.projectId,
       token: this.settings.token,
+      onRateLimitWait: ({ waitMs, attempt, maxAttempts }) => {
+        const seconds = Math.max(1, Math.ceil(waitMs / 1000));
+        const message = `Rate limited by GitLab, retrying in ${seconds}s (${attempt}/${maxAttempts})...`;
+        this.activeProgressUpdate?.({ stage: 'pulling', message });
+        this.updateStatusBar(`GitLab: Rate limit (${seconds}s)`);
+      },
     });
   }
 
@@ -395,6 +402,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     this.isSyncing = true;
     this.updateStatusBar('GitLab: Syncing...');
     const progressUi = this.createSyncProgressNotice();
+    this.activeProgressUpdate = (progress) => progressUi.update(progress);
 
     try {
       const engine = this.createSyncEngine((progress) => progressUi.update(progress));
@@ -426,6 +434,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       this.updateStatusBar('GitLab: Sync failed');
       new Notice(`GitLab sync failed: ${message} (click to dismiss)`, 0);
     } finally {
+      this.activeProgressUpdate = null;
       this.isSyncing = false;
     }
   }

@@ -859,4 +859,118 @@ describe('SyncEngine', () => {
     expect(events.some((e) => e.stage === 'pulling' && e.current === 5 && e.total === 5)).toBe(true);
     expect(events.some((e) => e.stage === 'writing' && e.current === 5 && e.total === 5)).toBe(true);
   });
+
+  it('chunks initial pull via getRawTextsBatch and falls back to getRawText only for omitted paths', async () => {
+    const files: Record<string, string> = {};
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const treeEntries = ['n0.md', 'n1.md', 'n2.md', 'n3.md', 'n4.md'].map((p, idx) => ({
+      id: `b${idx}`,
+      name: p,
+      type: 'blob' as const,
+      path: p,
+      mode: '100644',
+    }));
+
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('head1'),
+      getTreeRecursive: vi.fn().mockResolvedValue(treeEntries),
+      getRawTextsBatch: vi.fn(async (paths: string[]) => {
+        const out = new Map<string, string>();
+        for (const p of paths) {
+          if (p !== 'n3.md') {
+            out.set(p, `batch:${p}`);
+          }
+        }
+        return out;
+      }),
+      getRawText: vi.fn(async (p: string) => `rest:${p}`),
+      createCommit: vi.fn(),
+    };
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+
+    const progressEvents: Array<{ stage: string; current?: number; total?: number }> = [];
+    const engine = new SyncEngine({
+      settings: DEFAULT_SETTINGS,
+      state,
+      client,
+      vault,
+      saveState: vi.fn(),
+      batchDownloadSize: 2,
+      onProgress: (p) => progressEvents.push({ stage: p.stage, current: p.current, total: p.total }),
+    });
+
+    const res = await engine.sync();
+
+    expect(res.pulled).toBe(5);
+    expect(client.getRawTextsBatch).toHaveBeenCalledTimes(3);
+    expect(client.getRawTextsBatch.mock.calls.map((c) => c[0])).toEqual([
+      ['n0.md', 'n1.md'],
+      ['n2.md', 'n3.md'],
+      ['n4.md'],
+    ]);
+    expect(client.getRawText).toHaveBeenCalledTimes(1);
+    expect(client.getRawText).toHaveBeenCalledWith('n3.md', 'head1');
+    expect(files['n0.md']).toBe('batch:n0.md');
+    expect(files['n3.md']).toBe('rest:n3.md');
+    expect(files['n4.md']).toBe('batch:n4.md');
+    expect(progressEvents.some((e) => e.stage === 'pulling' && e.current === 5 && e.total === 5)).toBe(true);
+  });
+
+  it('stops batching and falls back to REST getRawText when first batch returns empty Map', async () => {
+    const files: Record<string, string> = {};
+    const state: SyncState = {
+      lastSyncedCommitSha: null,
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const treeEntries = ['n0.md', 'n1.md', 'n2.md', 'n3.md'].map((p, idx) => ({
+      id: `b${idx}`,
+      name: p,
+      type: 'blob' as const,
+      path: p,
+      mode: '100644',
+    }));
+
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('head1'),
+      getTreeRecursive: vi.fn().mockResolvedValue(treeEntries),
+      getRawTextsBatch: vi.fn().mockResolvedValue(new Map<string, string>()),
+      getRawText: vi.fn(async (p: string) => `rest:${p}`),
+      createCommit: vi.fn(),
+    };
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+
+    const engine = new SyncEngine({
+      settings: DEFAULT_SETTINGS,
+      state,
+      client,
+      vault,
+      saveState: vi.fn(),
+      batchDownloadSize: 2,
+    });
+
+    const res = await engine.sync();
+
+    expect(res.pulled).toBe(4);
+    expect(client.getRawTextsBatch).toHaveBeenCalledTimes(1);
+    expect(client.getRawText).toHaveBeenCalledTimes(4);
+    expect(files['n0.md']).toBe('rest:n0.md');
+    expect(files['n3.md']).toBe('rest:n3.md');
+  });
 });
