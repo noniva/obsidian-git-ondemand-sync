@@ -46,6 +46,7 @@ function createMockPlugin(
     saveAndRefreshSettings: vi.fn().mockResolvedValue(undefined),
     clearConflictState: vi.fn().mockResolvedValue(undefined),
     clearImageCache: vi.fn().mockResolvedValue(undefined),
+    cleanupUnusedImages: vi.fn().mockResolvedValue(undefined),
     syncWithNotice: vi.fn().mockResolvedValue(undefined),
   };
   return plugin as unknown as GitLabOnDemandSyncPlugin & {
@@ -54,6 +55,7 @@ function createMockPlugin(
     saveAndRefreshSettings: ReturnType<typeof vi.fn>;
     clearConflictState: ReturnType<typeof vi.fn>;
     clearImageCache: ReturnType<typeof vi.fn>;
+    cleanupUnusedImages: ReturnType<typeof vi.fn>;
     syncWithNotice: ReturnType<typeof vi.fn>;
   };
 }
@@ -287,5 +289,30 @@ describe('GitLabSyncSettingTab', () => {
     clearCacheBtn.click();
     await vi.waitFor(() => expect(plugin.clearImageCache).toHaveBeenCalledTimes(1));
     expect(noticeMessages).toContain('Image cache cleared.');
+  });
+
+  it('renders image compression controls and Clean Up Unused Images button', async () => {
+    const plugin = createMockPlugin();
+    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    tab.display();
+
+    toggleCheckbox(tab.containerEl, 'Optimize Images Before Upload');
+    await vi.waitFor(() => expect(plugin.saveAndRefreshSettings).toHaveBeenCalledTimes(1));
+    expect(plugin.settings.compressImagesOnUpload).toBe(false);
+
+    setTextValue(tab.containerEl, 'Max Upload Image Dimension (px)', '100');
+    expect(plugin.settings.maxUploadImageDimension).toBe(256);
+
+    setTextValue(tab.containerEl, 'Max Upload Image Dimension (px)', '1280');
+    expect(plugin.settings.maxUploadImageDimension).toBe(1280);
+
+    setTextValue(tab.containerEl, 'Max Upload Image Dimension (px)', '');
+    expect(plugin.settings.maxUploadImageDimension).toBe(DEFAULT_SETTINGS.maxUploadImageDimension);
+
+    const cleanupBtn = findSettingRow(tab.containerEl, 'Clean Up Unused Images').querySelector(
+      'button',
+    )!;
+    cleanupBtn.click();
+    await vi.waitFor(() => expect(plugin.cleanupUnusedImages).toHaveBeenCalledTimes(1));
   });
 });

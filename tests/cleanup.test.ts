@@ -71,6 +71,20 @@ describe('extractImageTargetsFromText', () => {
     const content = '![[a.png]]\n![[a.png|200]]\n![alt](a.png)';
     expect(extractImageTargetsFromText(content)).toEqual(['a.png']);
   });
+
+  it('extracts quoted paths with spaces from canvas JSON and YAML frontmatter', () => {
+    const content = [
+      '---',
+      "cover: 'Asset/my img.png'",
+      '---',
+      '{"id":"1","type":"file","file":"Asset/Pasted image 2026.png"}',
+    ].join('\n');
+
+    const targets = extractImageTargetsFromText(content);
+    expect(targets).toEqual(
+      expect.arrayContaining(['Asset/my img.png', 'Asset/Pasted image 2026.png']),
+    );
+  });
 });
 
 describe('findUnusedRemoteImages', () => {

@@ -252,6 +252,42 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         }),
       );
 
+    new Setting(containerEl)
+      .setName('Optimize Images Before Upload')
+      .setDesc('Resize and convert pasted or dropped images to WebP before uploading.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.compressImagesOnUpload).onChange(async (value) => {
+          this.plugin.settings.compressImagesOnUpload = value;
+          await this.plugin.saveAndRefreshSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName('Max Upload Image Dimension (px)')
+      .setDesc('Maximum width or height in pixels when optimizing uploaded images (minimum 256 px).')
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_SETTINGS.maxUploadImageDimension))
+          .setValue(String(this.plugin.settings.maxUploadImageDimension))
+          .onChange((value) => {
+            const parsed = Number(value.trim());
+            this.plugin.settings.maxUploadImageDimension =
+              value.trim() !== '' && Number.isFinite(parsed)
+                ? Math.max(256, Math.floor(parsed))
+                : DEFAULT_SETTINGS.maxUploadImageDimension;
+            this.scheduleTextSave();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName('Clean Up Unused Images')
+      .setDesc('Scan the synced repository for remote images not referenced by any note.')
+      .addButton((button) =>
+        button.setButtonText('Clean Up Unused Images').onClick(async () => {
+          await this.plugin.cleanupUnusedImages();
+        }),
+      );
+
     const conflictBranch = this.plugin.syncState.activeConflictBranch;
     new Setting(containerEl)
       .setName('Clear Conflict State')

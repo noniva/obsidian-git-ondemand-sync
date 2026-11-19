@@ -3,6 +3,11 @@ import { Notice, Platform, Plugin } from 'obsidian';
 import { GitHubClient } from './github/client';
 import { GitLabClient } from './gitlab/client';
 import {
+  executeUnusedImageCleanup,
+  planUnusedImageCleanup,
+  UnusedImagesModal,
+} from './images/cleanup';
+import {
   createLivePreviewImageExtension,
   refreshRemoteImagesEffect,
 } from './images/live-preview';
@@ -82,6 +87,14 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       name: 'Sync with Git',
       callback: () => {
         void this.syncWithNotice();
+      },
+    });
+
+    this.addCommand({
+      id: 'cleanup-unused-images',
+      name: 'Clean up unused remote images',
+      callback: () => {
+        void this.cleanupUnusedImages();
       },
     });
 
@@ -169,6 +182,69 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
     await this.loader.clearCache();
   }
 
+  /**
+   * Scans the vault and remote branch for unreferenced images and prompts before deleting them.
+   */
+  async cleanupUnusedImages(): Promise<void> {
+    if (!this.isEnabled()) {
+      new Notice(
+        'Git On-Demand Sync is disabled on desktop. Enable "Enable on Desktop (Testing)" in settings.',
+      );
+      return;
+    }
+
+    const branch = this.settings.branch.trim() || 'main';
+    const scanNotice = new Notice('Scanning for unused remote images...', 0);
+    let unusedPaths: string[];
+    try {
+      const plan = await planUnusedImageCleanup({
+        settings: this.settings,
+        state: this.syncState,
+        client: this.client,
+        vault: this.createVaultAdapter(),
+        configDir: this.getConfigDir(),
+      });
+      unusedPaths = plan.unusedPaths;
+    } catch (error) {
+      new Notice(`Clean up failed: ${this.formatErrorMessage(error)}`, 0);
+      return;
+    } finally {
+      scanNotice.hide?.();
+    }
+
+    if (unusedPaths.length === 0) {
+      new Notice('No unused remote images found.');
+      return;
+    }
+
+    new UnusedImagesModal(this.app, {
+      branch,
+      unusedPaths,
+      onConfirm: async (selectedPaths) => {
+        const deleteNotice = new Notice(
+          `Deleting ${selectedPaths.length} unused image(s)...`,
+          0,
+        );
+        try {
+          await executeUnusedImageCleanup({
+            branch,
+            selectedPaths,
+            client: this.client,
+            state: this.syncState,
+            saveState: () => this.savePluginData(),
+            clearCache: () => this.clearImageCache(),
+          });
+          new Notice(`Deleted ${selectedPaths.length} unused image(s) from "${branch}".`);
+        } catch (error) {
+          new Notice(`Clean up failed: ${this.formatErrorMessage(error)}`, 0);
+          throw error;
+        } finally {
+          deleteNotice.hide?.();
+        }
+      },
+    }).open();
+  }
+
   private createClient(): RemoteGitClient {
     const config = {
       baseUrl: this.settings.apiUrl,
@@ -227,12 +303,25 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
         ? Math.max(1, Math.floor(rawMaxCacheMb))
         : DEFAULT_SETTINGS.maxImageCacheMb;
 
+    const compressImagesOnUpload =
+      typeof rawSettings?.compressImagesOnUpload === 'boolean'
+        ? rawSettings.compressImagesOnUpload
+        : DEFAULT_SETTINGS.compressImagesOnUpload;
+
+    const rawMaxUploadDim = rawSettings?.maxUploadImageDimension;
+    const maxUploadImageDimension =
+      typeof rawMaxUploadDim === 'number' && Number.isFinite(rawMaxUploadDim)
+        ? Math.max(256, Math.floor(rawMaxUploadDim))
+        : DEFAULT_SETTINGS.maxUploadImageDimension;
+
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...(rawSettings ?? {}),
       provider,
       apiUrl,
       maxImageCacheMb,
+      compressImagesOnUpload,
+      maxUploadImageDimension,
       textAllowlist: Array.isArray(rawSettings?.textAllowlist)
         ? [...rawSettings.textAllowlist]
         : [...DEFAULT_SETTINGS.textAllowlist],

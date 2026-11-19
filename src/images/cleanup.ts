@@ -13,6 +13,8 @@ const WIKILINK_RE = /!?\[\[([^\]]+)\]\]/g;
 const HTML_IMG_SRC_RE = /<img\b[^>]*?\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const IMAGE_TOKEN_RE =
   /[^\s"'`<>()[\]{}|]+?\.(?:png|jpe?g|gif|webp|svg|bmp|avif|heic|heif|ico|tiff?)/gi;
+const QUOTED_IMAGE_RE =
+  /(?:"([^"\r\n]+?\.(?:png|jpe?g|gif|webp|svg|bmp|avif|heic|heif|ico|tiff?))"|'([^'\r\n]+?\.(?:png|jpe?g|gif|webp|svg|bmp|avif|heic|heif|ico|tiff?))')/gi;
 
 function addTargetIfLocal(raw: string, targets: Set<string>): void {
   const trimmed = raw.trim();
@@ -90,6 +92,10 @@ export function extractImageTargetsFromText(content: string): string[] {
   extractMarkdownLinkTargets(content, targets);
 
   for (const match of content.matchAll(HTML_IMG_SRC_RE)) {
+    addTargetIfLocal(match[1] ?? match[2] ?? '', targets);
+  }
+
+  for (const match of content.matchAll(QUOTED_IMAGE_RE)) {
     addTargetIfLocal(match[1] ?? match[2] ?? '', targets);
   }
 

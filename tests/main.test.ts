@@ -56,6 +56,7 @@ vi.mock('obsidian', async (importOriginal) => {
 });
 
 import { Platform, TFile, type App, type MarkdownPostProcessor, type PluginManifest } from 'obsidian';
+import { UnusedImagesModal } from '../src/images/cleanup';
 import { refreshRemoteImagesEffect } from '../src/images/live-preview';
 import { OnDemandImageLoader } from '../src/images/loader';
 import GitLabOnDemandSyncPlugin from '../src/main';
@@ -635,5 +636,140 @@ describe('GitLabOnDemandSyncPlugin', () => {
     await plugin.saveAndRefreshSettings();
     await plugin.syncWithNotice();
     expect(requestedUrls[0]).toContain('https://gitlab.example.com/api/v4/projects/octocat%2Fvault/');
+  });
+
+  it('restores compressImagesOnUpload, clamps maxUploadImageDimension, and registers cleanup-unused-images command', async () => {
+    const harness = createVaultAppHarness();
+    const plugin = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    const addCommandSpy = vi.spyOn(plugin, 'addCommand');
+    vi.spyOn(plugin, 'loadData').mockResolvedValueOnce({
+      settings: {
+        compressImagesOnUpload: false,
+        maxUploadImageDimension: 120.9,
+      },
+    });
+
+    await plugin.onload();
+
+    expect(plugin.settings.compressImagesOnUpload).toBe(false);
+    expect(plugin.settings.maxUploadImageDimension).toBe(256);
+    expect(addCommandSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'cleanup-unused-images',
+        name: 'Clean up unused remote images',
+      }),
+    );
+
+    const pluginInvalid = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    vi.spyOn(pluginInvalid, 'loadData').mockResolvedValueOnce({
+      settings: {
+        compressImagesOnUpload: 'yes' as unknown as boolean,
+        maxUploadImageDimension: Number.NaN,
+      },
+    });
+    await pluginInvalid.onload();
+    expect(pluginInvalid.settings.compressImagesOnUpload).toBe(DEFAULT_SETTINGS.compressImagesOnUpload);
+    expect(pluginInvalid.settings.maxUploadImageDimension).toBe(
+      DEFAULT_SETTINGS.maxUploadImageDimension,
+    );
+  });
+
+  it('cleanupUnusedImages() guards disabled state, handles empty/error paths, and deletes selected images via UnusedImagesModal', async () => {
+    const server = new FakeGitLabServer({ expectedToken: 'glpat-test' });
+    const headSha = server.seedBranch('main', {
+      'notes/keep.md': '![[used.png]]',
+      'attachments/used.png': new Uint8Array([1, 2, 3]),
+      'attachments/orphan-1.png': new Uint8Array([4, 5, 6]),
+      'attachments/orphan-2.png': new Uint8Array([7, 8, 9]),
+    });
+    requestUrlBox.fn = server.requestFn;
+
+    const harness = createVaultAppHarness({
+      initialFiles: {
+        'notes/keep.md': '![[used.png]]',
+      },
+    });
+    const plugin = new GitLabOnDemandSyncPlugin(harness.app, TEST_MANIFEST);
+    vi.spyOn(plugin, 'loadData').mockResolvedValueOnce({
+      settings: {
+        provider: 'gitlab',
+        apiUrl: 'https://gitlab.example.com',
+        projectId: 'user/vault',
+        branch: 'main',
+        token: 'glpat-test',
+        enableOnDesktop: false,
+      },
+      syncState: {
+        lastSyncedCommitSha: headSha,
+        activeConflictBranch: null,
+        files: {},
+        remoteImagePaths: [
+          'attachments/used.png',
+          'attachments/orphan-1.png',
+          'attachments/orphan-2.png',
+        ],
+      },
+    });
+    await plugin.onload();
+
+    // 1. Disabled on desktop
+    await plugin.cleanupUnusedImages();
+    expect(notices[0].message).toContain('disabled on desktop');
+
+    // 2. Enable and test error path when remote has moved ahead
+    plugin.settings.enableOnDesktop = true;
+    plugin.syncState.lastSyncedCommitSha = 'stale-sha';
+    await plugin.cleanupUnusedImages();
+    expect(noticeInstances[1].hidden).toBe(true);
+    expect(notices[2].message).toContain('Clean up failed:');
+    expect(notices[2].timeout).toBe(0);
+
+    // 3. Open modal when unused images exist, uncheck one, confirm deletion
+    plugin.syncState.lastSyncedCommitSha = headSha;
+    let openedModal: UnusedImagesModal | null = null;
+    vi.spyOn(UnusedImagesModal.prototype, 'open').mockImplementation(function (
+      this: UnusedImagesModal,
+    ) {
+      openedModal = this;
+      this.onOpen();
+    });
+    const clearCacheSpy = vi.spyOn(plugin, 'clearImageCache').mockResolvedValue(undefined);
+    const saveSpy = vi.spyOn(plugin, 'savePluginData').mockResolvedValue(undefined);
+
+    await plugin.cleanupUnusedImages();
+    expect(openedModal).not.toBeNull();
+
+    const modalEl = openedModal!.contentEl;
+    const checkboxes = Array.from(modalEl.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    expect(checkboxes).toHaveLength(2);
+    // Uncheck orphan-2.png
+    checkboxes[1].checked = false;
+    checkboxes[1].dispatchEvent(new Event('change'));
+
+    const deleteBtn = Array.from(modalEl.querySelectorAll('button')).find((b) =>
+      b.textContent?.startsWith('Delete ('),
+    )!;
+    deleteBtn.click();
+
+    await vi.waitFor(() =>
+      expect(notices.some((n) => n.message === 'Deleted 1 unused image(s) from "main".')).toBe(true),
+    );
+    expect(server.getBranchFiles('main')['attachments/orphan-1.png']).toBeUndefined();
+    expect(server.getBranchFiles('main')['attachments/orphan-2.png']).toBeDefined();
+    expect(plugin.syncState.remoteImagePaths).toEqual([
+      'attachments/used.png',
+      'attachments/orphan-2.png',
+    ]);
+    expect(saveSpy).toHaveBeenCalled();
+    expect(clearCacheSpy).toHaveBeenCalled();
+
+    // 4. When no unused images remain (mark orphan-2 as used)
+    harness.files.set('notes/keep.md', '![[used.png]]\n![[orphan-2.png]]');
+    await plugin.cleanupUnusedImages();
+    expect(notices[notices.length - 1].message).toBe('No unused remote images found.');
+
+    for (const notice of notices) {
+      expect(notice.message).not.toMatch(EMOJI_RE);
+    }
   });
 });
