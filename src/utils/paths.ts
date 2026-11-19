@@ -85,20 +85,22 @@ export function isTextSyncPath(path: string, allowlist: string[]): boolean {
 
 /**
  * Returns true for paths that should never be synced: any path containing a dot-prefixed
- * segment (e.g. `.git`, `.github`, `.vscode`), except `.obsidian` when `syncObsidianDir` is true.
+ * segment (e.g. `.git`, `.github`, `.vscode`), except the configured Obsidian directory
+ * (when `syncObsidianDir` is true, still ignoring nested `.git`).
  */
-export function isIgnoredPath(path: string, syncObsidianDir: boolean): boolean {
+export function isIgnoredPath(path: string, syncObsidianDir: boolean, configDir = '.obsidian'): boolean {
   const normalized = normalizeVaultPath(path);
   if (!normalized) {
     return false;
   }
+  const normalizedConfigDir = normalizeVaultPath(configDir) || '.obsidian';
   const segments = normalized.split('/');
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
     if (!segment.startsWith('.')) {
       continue;
     }
-    if (i === 0 && segment === '.obsidian' && syncObsidianDir) {
+    if (i === 0 && segment === normalizedConfigDir && syncObsidianDir) {
       continue;
     }
     return true;
@@ -126,10 +128,10 @@ export function parseEmbedWidth(raw: string): number | undefined {
 }
 
 /**
- * Parses an Obsidian wikilink or markdown image embed target, extracting optional width
- * and returning null for empty targets or external/non-vault URIs.
+ * Parses an Obsidian wikilink or markdown image embed target, extracting optional alt text
+ * and width, and returning null for empty targets or external/non-vault URIs.
  */
-export function parseImageEmbed(rawTarget: string): { target: string; width?: number } | null {
+export function parseImageEmbed(rawTarget: string): { target: string; alt?: string; width?: number } | null {
   const trimmed = rawTarget.trim();
   if (!trimmed) {
     return null;
@@ -141,7 +143,7 @@ export function parseImageEmbed(rawTarget: string): { target: string; width?: nu
 
   const hashIdx = rawPath.indexOf('#');
   const pathWithoutFragment = (hashIdx >= 0 ? rawPath.slice(0, hashIdx) : rawPath).trim();
-  if (!pathWithoutFragment || URI_SCHEME_RE.test(pathWithoutFragment)) {
+  if (!pathWithoutFragment || pathWithoutFragment.startsWith('//') || URI_SCHEME_RE.test(pathWithoutFragment)) {
     return null;
   }
 
@@ -154,9 +156,24 @@ export function parseImageEmbed(rawTarget: string): { target: string; width?: nu
     return null;
   }
 
-  const width = alias ? parseEmbedWidth(alias) : undefined;
+  let alt: string | undefined;
+  let width: number | undefined;
+  if (alias) {
+    const parts = alias.split('|');
+    const lastPart = parts[parts.length - 1].trim();
+    const sizeMatch = EMBED_SIZE_RE.exec(lastPart);
+    if (sizeMatch) {
+      const parsedWidth = Number(sizeMatch[1]);
+      width = Number.isFinite(parsedWidth) && parsedWidth > 0 ? parsedWidth : undefined;
+      const altText = parts.slice(0, -1).join('|').trim();
+      alt = altText || undefined;
+    } else {
+      const altText = parts.join('|').trim();
+      alt = altText || undefined;
+    }
+  }
 
-  return { target: cleanedTarget, width };
+  return { target: cleanedTarget, alt, width };
 }
 
 function findMatchingPath(candidate: string, remoteImagePaths: string[]): string | null {
@@ -182,8 +199,10 @@ export function resolveRemoteImagePath(
   target: string,
   noteDir: string,
   remoteImagePaths: string[],
+  options?: { decodeTarget?: boolean },
 ): string | null {
-  const decodedTarget = safeDecodeURIComponent(target.trim());
+  const trimmedTarget = target.trim();
+  const decodedTarget = options?.decodeTarget === false ? trimmedTarget : safeDecodeURIComponent(trimmedTarget);
   const cleanedTarget = decodedTarget.replace(/\\/g, '/').replace(/^\/+/, '');
   if (!cleanedTarget || URI_SCHEME_RE.test(cleanedTarget)) {
     return null;

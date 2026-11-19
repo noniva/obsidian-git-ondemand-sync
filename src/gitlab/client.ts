@@ -21,6 +21,7 @@ export interface GitLabClientConfig {
   baseUrl: string;
   projectId: string;
   token: string;
+  timeoutMs?: number;
 }
 
 export interface CreateCommitParams {
@@ -47,12 +48,17 @@ export class GitLabClient {
   private readonly baseUrl: string;
   private readonly encodedProjectId: string;
   private readonly token: string;
+  private readonly timeoutMs: number;
   private readonly requestFn: RequestUrlFn;
 
   constructor(config: GitLabClientConfig, requestFn: RequestUrlFn = requestUrl) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.encodedProjectId = encodeURIComponent(config.projectId);
     this.token = config.token;
+    this.timeoutMs =
+      config.timeoutMs !== undefined && Number.isFinite(config.timeoutMs) && config.timeoutMs > 0
+        ? config.timeoutMs
+        : 30_000;
     this.requestFn = requestFn;
   }
 
@@ -71,6 +77,7 @@ export class GitLabClient {
   async getTreeRecursive(ref: string): Promise<GitLabTreeEntry[]> {
     const entries: GitLabTreeEntry[] = [];
     const encodedRef = encodeURIComponent(ref);
+    const seenPages = new Set<string>(['1']);
     let page = '1';
 
     while (page) {
@@ -83,6 +90,12 @@ export class GitLabClient {
       entries.push(...(res.json as GitLabTreeEntry[]));
 
       const nextPage = getHeaderCaseInsensitive(res.headers, 'x-next-page')?.trim() ?? '';
+      if (nextPage) {
+        if (seenPages.has(nextPage)) {
+          throw new Error(`GitLab API pagination loop detected at page "${nextPage}"`);
+        }
+        seenPages.add(nextPage);
+      }
       page = nextPage;
     }
 
@@ -143,16 +156,41 @@ export class GitLabClient {
   ): Promise<RequestUrlResponse> {
     const method = options.method ?? 'GET';
     const url = `${this.baseUrl}/api/v4/projects/${this.encodedProjectId}${projectRelativePath}`;
-    const res = await this.requestFn({
-      url,
-      method,
-      headers: {
-        'PRIVATE-TOKEN': this.token,
-        ...options.headers,
-      },
-      body: options.body,
-      throw: false,
-    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    let res: RequestUrlResponse;
+    try {
+      const timeoutPromise = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error(`GitLab API ${method} ${projectRelativePath} timed out after ${this.timeoutMs}ms`));
+        }, this.timeoutMs);
+      });
+      res = await Promise.race([
+        this.requestFn({
+          url,
+          method,
+          headers: {
+            'PRIVATE-TOKEN': this.token,
+            ...options.headers,
+          },
+          body: options.body,
+          throw: false,
+        }),
+        timeoutPromise,
+      ]);
+    } catch (err) {
+      if (timedOut) {
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`GitLab API ${method} ${projectRelativePath} request failed: ${message}`, { cause: err });
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
 
     if (res.status < 200 || res.status >= 300) {
       const detail = res.text ? `: ${res.text.slice(0, 300)}` : '';

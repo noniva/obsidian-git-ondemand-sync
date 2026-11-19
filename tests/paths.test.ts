@@ -33,24 +33,30 @@ describe('paths', () => {
     expect(isIgnoredPath('notes/.hidden/secret.md', true)).toBe(true);
     expect(isIgnoredPath('.obsidian/app.json', false)).toBe(true);
     expect(isIgnoredPath('.obsidian/app.json', true)).toBe(false);
+    expect(isIgnoredPath('.obsidian/.git/config', true)).toBe(true);
+    expect(isIgnoredPath('.custom-obsidian/app.json', true, '.custom-obsidian')).toBe(false);
+    expect(isIgnoredPath('.obsidian/app.json', true, '.custom-obsidian')).toBe(true);
     expect(isIgnoredPath('notes/git-notes.md', false)).toBe(false);
   });
 
   it('parses wikilink sizing/aliases, multi-pipe sizing, percent-encoding, and ignores external URLs', () => {
-    expect(parseImageEmbed('folder/img.png|300')).toEqual({ target: 'folder/img.png', width: 300 });
-    expect(parseImageEmbed('img.png|300x200')).toEqual({ target: 'img.png', width: 300 });
-    expect(parseImageEmbed('img.png|alt text')).toEqual({ target: 'img.png', width: undefined });
-    expect(parseImageEmbed('img.png|alt text|300')).toEqual({ target: 'img.png', width: 300 });
-    expect(parseImageEmbed('img.png|alt text|300x200')).toEqual({ target: 'img.png', width: 300 });
+    expect(parseImageEmbed('folder/img.png|300')).toEqual({ target: 'folder/img.png', alt: undefined, width: 300 });
+    expect(parseImageEmbed('img.png|300x200')).toEqual({ target: 'img.png', alt: undefined, width: 300 });
+    expect(parseImageEmbed('img.png|alt text')).toEqual({ target: 'img.png', alt: 'alt text', width: undefined });
+    expect(parseImageEmbed('img.png|alt text|300')).toEqual({ target: 'img.png', alt: 'alt text', width: 300 });
+    expect(parseImageEmbed('img.png|alt text|300x200')).toEqual({ target: 'img.png', alt: 'alt text', width: 300 });
     expect(parseEmbedWidth('alt text|420')).toBe(420);
     expect(parseImageEmbed('attachments/my%20photo.png')).toEqual({
       target: 'attachments/my photo.png',
+      alt: undefined,
       width: undefined,
     });
     expect(parseImageEmbed('attachments/100%bad.png')).toEqual({
       target: 'attachments/100%bad.png',
+      alt: undefined,
       width: undefined,
     });
+    expect(parseImageEmbed('//example.com/a.png')).toBeNull();
     expect(parseImageEmbed('https://example.com/a.png')).toBeNull();
     expect(parseImageEmbed('http://example.com/a.png')).toBeNull();
     expect(parseImageEmbed('data:image/png;base64,AAA')).toBeNull();
@@ -64,6 +70,11 @@ describe('paths', () => {
     expect(resolveRemoteImagePath('sub/nested.jpg', '', index)).toBe('sub/nested.jpg');
     expect(resolveRemoteImagePath('../local.webp', 'notes/sub/deep', index)).toBe('notes/sub/local.webp');
     expect(resolveRemoteImagePath('missing.png', '', index)).toBeNull();
+
+    const encodedIndex = ['attachments/my%20literal.png'];
+    const parsedLiteral = parseImageEmbed('attachments/my%2520literal.png');
+    expect(parsedLiteral).toEqual({ target: 'attachments/my%20literal.png', alt: undefined, width: undefined });
+    expect(resolveRemoteImagePath(parsedLiteral!.target, '', encodedIndex, { decodeTarget: false })).toBe('attachments/my%20literal.png');
   });
 
   it('computes deterministic sha256 hex', async () => {

@@ -51,6 +51,7 @@ export class OnDemandImageLoader {
   private readonly client: Pick<GitLabClient, 'getRawBinary'>;
   private readonly blobApi: BlobUrlApi;
   private readonly maxConcurrent: number;
+  private readonly maxMemoryImages: number;
   private readonly queue: QueuedLoadTask[] = [];
   private readonly activeUrls = new Set<string>();
   private readonly memoryImages = new Map<string, string>();
@@ -61,10 +62,14 @@ export class OnDemandImageLoader {
     client: Pick<GitLabClient, 'getRawBinary'>,
     blobApi: BlobUrlApi = globalThis.URL,
     maxConcurrent = 3,
+    maxMemoryImages = 20,
   ) {
     this.client = client;
     this.blobApi = blobApi;
-    this.maxConcurrent = Math.max(1, Math.floor(maxConcurrent));
+    const validConcurrent = Number.isFinite(maxConcurrent) ? maxConcurrent : 3;
+    this.maxConcurrent = Math.max(1, Math.floor(validConcurrent));
+    const validMemoryImages = Number.isFinite(maxMemoryImages) ? maxMemoryImages : 20;
+    this.maxMemoryImages = Math.max(1, Math.floor(validMemoryImages));
   }
 
   /**
@@ -80,6 +85,8 @@ export class OnDemandImageLoader {
     const cacheKey = normalizeVaultPath(repoPath);
     const cachedUrl = this.memoryImages.get(cacheKey);
     if (cachedUrl) {
+      this.memoryImages.delete(cacheKey);
+      this.memoryImages.set(cacheKey, cachedUrl);
       this.applyLoadedUrl(imgEl, repoPath, cachedUrl);
       return () => {};
     }
@@ -217,12 +224,26 @@ export class OnDemandImageLoader {
     const cacheKey = normalizeVaultPath(repoPath);
     const previousUrl = this.memoryImages.get(cacheKey);
     if (previousUrl) {
+      this.memoryImages.delete(cacheKey);
       this.revokeUrl(previousUrl);
     }
 
     const url = this.blobApi.createObjectURL(blob);
     this.memoryImages.set(cacheKey, url);
     this.activeUrls.add(url);
+
+    while (this.memoryImages.size > this.maxMemoryImages) {
+      const oldestKey = this.memoryImages.keys().next().value;
+      if (oldestKey === undefined) {
+        break;
+      }
+      const oldestUrl = this.memoryImages.get(oldestKey);
+      this.memoryImages.delete(oldestKey);
+      if (oldestUrl) {
+        this.revokeUrl(oldestUrl);
+      }
+    }
+
     return url;
   }
 

@@ -155,4 +155,30 @@ describe('GitLabClient', () => {
     const client = new GitLabClient(cfg, req);
     await expect(client.getRawText('missing.md', 'main')).rejects.toThrow(/404/);
   });
+
+  it('throws on repeated x-next-page pagination headers and enforces request timeout with cause', async () => {
+    const loopReq = vi.fn().mockResolvedValue({
+      status: 200,
+      json: [],
+      headers: { 'x-next-page': '1' },
+      text: '',
+      arrayBuffer: new ArrayBuffer(0),
+    });
+    const loopClient = new GitLabClient(cfg, loopReq);
+    await expect(loopClient.getTreeRecursive('abc')).rejects.toThrow(/pagination loop/i);
+
+    const slowReq = vi.fn(() => new Promise<never>(() => {}));
+    const timeoutClient = new GitLabClient({ ...cfg, timeoutMs: 15 }, slowReq);
+    await expect(timeoutClient.getBranchHead('main')).rejects.toThrow(/timed out/i);
+
+    const rootCause = new Error('ECONNRESET');
+    const failReq = vi.fn().mockRejectedValue(rootCause);
+    const causeClient = new GitLabClient(cfg, failReq);
+    try {
+      await causeClient.getBranchHead('main');
+      expect.unreachable();
+    } catch (err) {
+      expect((err as Error & { cause?: unknown }).cause).toBe(rootCause);
+    }
+  });
 });

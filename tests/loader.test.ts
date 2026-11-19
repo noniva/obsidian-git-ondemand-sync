@@ -330,4 +330,26 @@ describe('OnDemandImageLoader', () => {
     );
     expect(failImg.src).toBe('');
   });
+
+  it('falls back to default concurrency 3 when maxConcurrent is NaN and evicts oldest LRU memoryImage past maxMemoryImages', async () => {
+    let seq = 0;
+    const blobApi = {
+      createObjectURL: vi.fn(() => `blob:lru-${++seq}`),
+      revokeObjectURL: vi.fn(),
+    };
+    const client = { getRawBinary: vi.fn().mockResolvedValue(new Uint8Array([1]).buffer) } as any;
+    const loader = new OnDemandImageLoader(client, blobApi, Number.NaN, 2);
+
+    loader.registerMemoryImage('a.png', new Blob([new Uint8Array([1])]));
+    loader.registerMemoryImage('b.png', new Blob([new Uint8Array([2])]));
+    // Touch a.png via loadIntoElement so b.png becomes least recently used
+    loader.loadIntoElement(createMockImg(), 'a.png', 'main');
+    loader.registerMemoryImage('c.png', new Blob([new Uint8Array([3])]));
+
+    expect(blobApi.revokeObjectURL).toHaveBeenCalledWith('blob:lru-2');
+    const img = createMockImg();
+    loader.loadIntoElement(img, 'c.png', 'main');
+    expect(img.src).toBe('blob:lru-3');
+    expect(client.getRawBinary).not.toHaveBeenCalled();
+  });
 });

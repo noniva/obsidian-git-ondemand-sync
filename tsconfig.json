@@ -16,7 +16,8 @@
     "skipLibCheck": true,
     "lib": [
       "DOM",
-      "ES2020"
+      "ES2020",
+      "ES2022.Error"
     ]
   },
   "include": [
