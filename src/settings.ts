@@ -8,10 +8,30 @@ import { DEFAULT_SETTINGS } from './types';
  */
 export class GitLabSyncSettingTab extends PluginSettingTab {
   private readonly plugin: GitLabOnDemandSyncPlugin;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(app: App, plugin: GitLabOnDemandSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  private scheduleTextSave(): void {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+    }
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      void this.plugin.saveAndRefreshSettings();
+    }, 300);
+  }
+
+  override hide(): void {
+    if (this.saveTimer !== null) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+      void this.plugin.saveAndRefreshSettings();
+    }
+    super.hide();
   }
 
   display(): void {
@@ -25,9 +45,9 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.gitlabUrl)
           .setValue(this.plugin.settings.gitlabUrl)
-          .onChange(async (value) => {
+          .onChange((value) => {
             this.plugin.settings.gitlabUrl = value.trim() || DEFAULT_SETTINGS.gitlabUrl;
-            await this.plugin.saveAndRefreshSettings();
+            this.scheduleTextSave();
           }),
       );
 
@@ -38,9 +58,9 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('username/my-vault')
           .setValue(this.plugin.settings.projectId)
-          .onChange(async (value) => {
+          .onChange((value) => {
             this.plugin.settings.projectId = value.trim();
-            await this.plugin.saveAndRefreshSettings();
+            this.scheduleTextSave();
           }),
       );
 
@@ -51,9 +71,9 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         text
           .setPlaceholder(DEFAULT_SETTINGS.branch)
           .setValue(this.plugin.settings.branch)
-          .onChange(async (value) => {
+          .onChange((value) => {
             this.plugin.settings.branch = value.trim() || DEFAULT_SETTINGS.branch;
-            await this.plugin.saveAndRefreshSettings();
+            this.scheduleTextSave();
           }),
       );
 
@@ -65,9 +85,9 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('glpat-...')
           .setValue(this.plugin.settings.token)
-          .onChange(async (value) => {
+          .onChange((value) => {
             this.plugin.settings.token = value.trim();
-            await this.plugin.saveAndRefreshSettings();
+            this.scheduleTextSave();
           });
       });
 
@@ -78,14 +98,14 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('.md, .canvas, .txt')
           .setValue(this.plugin.settings.textAllowlist.join(', '))
-          .onChange(async (value) => {
+          .onChange((value) => {
             const parsed = value
               .split(',')
               .map((item) => item.trim())
               .filter(Boolean);
             this.plugin.settings.textAllowlist =
               parsed.length > 0 ? parsed : [...DEFAULT_SETTINGS.textAllowlist];
-            await this.plugin.saveAndRefreshSettings();
+            this.scheduleTextSave();
           }),
       );
 
@@ -101,15 +121,14 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Attachment Folder')
-      .setDesc('Repository folder where pasted or dropped images are uploaded.')
+      .setDesc('Repository folder where pasted or dropped images are uploaded (leave empty for vault root).')
       .addText((text) =>
         text
           .setPlaceholder(DEFAULT_SETTINGS.attachmentFolder)
           .setValue(this.plugin.settings.attachmentFolder)
-          .onChange(async (value) => {
-            this.plugin.settings.attachmentFolder =
-              value.trim() || DEFAULT_SETTINGS.attachmentFolder;
-            await this.plugin.saveAndRefreshSettings();
+          .onChange((value) => {
+            this.plugin.settings.attachmentFolder = value.trim();
+            this.scheduleTextSave();
           }),
       );
 

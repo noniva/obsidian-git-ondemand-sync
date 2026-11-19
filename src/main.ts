@@ -1,6 +1,10 @@
+import type { EditorView } from '@codemirror/view';
 import { Notice, Platform, Plugin } from 'obsidian';
 import { GitLabClient } from './gitlab/client';
-import { createLivePreviewImageExtension } from './images/live-preview';
+import {
+  createLivePreviewImageExtension,
+  refreshRemoteImagesEffect,
+} from './images/live-preview';
 import { OnDemandImageLoader } from './images/loader';
 import { registerMobileImageUpload } from './images/paste-upload';
 import { type ImageRenderContext, registerReadingViewImageProcessor } from './images/reading-view';
@@ -13,13 +17,6 @@ interface PersistedPluginData {
   settings?: Partial<PluginSettings>;
   syncState?: Partial<SyncState>;
 }
-
-const DEFAULT_SYNC_STATE: SyncState = {
-  lastSyncedCommitSha: null,
-  activeConflictBranch: null,
-  files: {},
-  remoteImagePaths: [],
-};
 
 function createDefaultSyncState(): SyncState {
   return {
@@ -77,11 +74,21 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       loader: this.loader,
       saveState: () => this.savePluginData(),
       isEnabled: () => this.isEnabled(),
+      configDir: this.getConfigDir(),
+      onUploaded: () => this.refreshOpenEditors(),
     }));
 
     this.app.workspace.onLayoutReady(() => {
+      if (!this.isEnabled()) {
+        return;
+      }
+      if (this.syncState.activeConflictBranch) {
+        new Notice(
+          `GitLab sync has active conflict branch "${this.syncState.activeConflictBranch}" awaiting desktop merge and "Clear Conflict State" in settings.`,
+          10000,
+        );
+      }
       if (
-        this.isEnabled() &&
         this.settings.autoSyncOnOpen &&
         this.settings.token.trim() &&
         this.settings.projectId.trim()
@@ -97,6 +104,27 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
   isEnabled(): boolean {
     return Platform.isMobile || this.settings.enableOnDesktop;
+  }
+
+  private getConfigDir(): string {
+    return normalizeVaultPath(this.app.vault.configDir || '.obsidian') || '.obsidian';
+  }
+
+  refreshOpenEditors(): void {
+    const leaves = this.app.workspace.getLeavesOfType?.('markdown') ?? [];
+    for (const leaf of leaves) {
+      const view = leaf.view as {
+        editor?: { cm?: EditorView };
+        previewMode?: { rerender?: (full?: boolean) => void };
+      } | null | undefined;
+      if (!view) {
+        continue;
+      }
+      view.editor?.cm?.dispatch?.({
+        effects: refreshRemoteImagesEffect.of(undefined),
+      });
+      view.previewMode?.rerender?.(true);
+    }
   }
 
   async savePluginData(): Promise<void> {
@@ -132,8 +160,8 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
         : [...DEFAULT_SETTINGS.textAllowlist],
     };
 
-    this.syncState = {
-      ...DEFAULT_SYNC_STATE,
+    const syncState: SyncState = {
+      ...createDefaultSyncState(),
       ...(rawSyncState ?? {}),
       files:
         rawSyncState?.files && typeof rawSyncState.files === 'object'
@@ -143,6 +171,21 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
         ? [...rawSyncState.remoteImagePaths]
         : [],
     };
+    if (
+      rawSyncState?.conflictPushedHashes &&
+      typeof rawSyncState.conflictPushedHashes === 'object' &&
+      !Array.isArray(rawSyncState.conflictPushedHashes)
+    ) {
+      syncState.conflictPushedHashes = { ...rawSyncState.conflictPushedHashes };
+    } else {
+      delete syncState.conflictPushedHashes;
+    }
+    if (Array.isArray(rawSyncState?.conflictDeletedPaths)) {
+      syncState.conflictDeletedPaths = [...rawSyncState.conflictDeletedPaths];
+    } else {
+      delete syncState.conflictDeletedPaths;
+    }
+    this.syncState = syncState;
   }
 
   private getImageRenderContext(): ImageRenderContext {
@@ -158,7 +201,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
 
   private async collectObsidianTextFiles(): Promise<string[]> {
     const adapter = this.app.vault.adapter;
-    const configDir = this.app.vault.configDir || '.obsidian';
+    const configDir = this.getConfigDir();
     if (!(await adapter.exists(configDir))) {
       return [];
     }
@@ -214,9 +257,10 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
         }
 
         const result: string[] = [];
+        const configDir = this.getConfigDir();
         for (const filePath of paths) {
           if (
-            !isIgnoredPath(filePath, this.settings.syncObsidianDir) &&
+            !isIgnoredPath(filePath, this.settings.syncObsidianDir, configDir) &&
             isTextSyncPath(filePath, this.settings.textAllowlist)
           ) {
             result.push(filePath);
@@ -246,6 +290,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       client: this.client,
       vault: this.createVaultAdapter(),
       saveState: () => this.savePluginData(),
+      configDir: this.getConfigDir(),
     });
   }
 
@@ -280,6 +325,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       const engine = this.createSyncEngine();
 
       const res = await engine.sync();
+      this.refreshOpenEditors();
       if (res.conflictBranch) {
         new Notice(
           `GitLab sync conflict! Local changes were pushed to branch "${res.conflictBranch}". On desktop, run: git fetch && git merge origin/${res.conflictBranch}`,
