@@ -318,6 +318,7 @@ describe('createLivePreviewImageExtension', () => {
 
     view.destroy();
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(builtInEmbed.dataset.gitlabProcessed).toBeUndefined();
   });
 
   it('reloads a failed image in Live Preview without expanding raw markdown on mousedown + click', async () => {
@@ -392,5 +393,6 @@ describe('createLivePreviewImageExtension', () => {
 
     view.destroy();
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(builtInEmbed.dataset.gitlabProcessed).toBeUndefined();
   });
 });

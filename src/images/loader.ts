@@ -626,12 +626,6 @@ export class OnDemandImageLoader {
     this.imgErrorCleanups.get(imgEl)?.();
     this.imgErrorCleanups.delete(imgEl);
     this.removeErrorBox(imgEl);
-    imgEl.src = url;
-    if (imgEl.dataset) {
-      imgEl.dataset.gitlabSrc = repoPath;
-    }
-    imgEl.classList?.remove('gitlab-img-loading', 'gitlab-img-error');
-    imgEl.classList?.add('gitlab-img-loaded');
 
     if (onDecodeError && typeof imgEl.addEventListener === 'function') {
       const handleError = (): void => {
@@ -649,6 +643,13 @@ export class OnDemandImageLoader {
         imgEl.removeEventListener?.('load', handleLoad);
       });
     }
+
+    imgEl.src = url;
+    if (imgEl.dataset) {
+      imgEl.dataset.gitlabSrc = repoPath;
+    }
+    imgEl.classList?.remove('gitlab-img-loading', 'gitlab-img-error');
+    imgEl.classList?.add('gitlab-img-loaded');
   }
 
   private revokeUrl(url: string): void {

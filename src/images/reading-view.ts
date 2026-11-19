@@ -92,7 +92,11 @@ export function hydrateRemoteEmbed(
   embedEl.classList.add('is-loaded', 'gitlab-ondemand-embed');
   embedEl.replaceChildren(imgEl);
 
-  return ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
+  const loadCleanup = ctx.loader.observeAndLoad(imgEl, resolved, ref, fallbackRef);
+  return () => {
+    loadCleanup();
+    delete embedEl.dataset.gitlabProcessed;
+  };
 }
 
 function parseWidthAttr(raw: string | null): number | undefined {

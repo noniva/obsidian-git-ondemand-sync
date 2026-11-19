@@ -259,5 +259,12 @@ describe('registerReadingViewImageProcessor', () => {
     const { children: rehydrated } = await runProcessor(embedEl);
     expect(rehydrated).toHaveLength(1);
     expect(observeAndLoad).toHaveBeenCalledTimes(2);
+
+    // Simulate cleanup (e.g. temporary detach) then re-attaching embed -> must clear marker and re-hydrate
+    rehydrated[0].onunload();
+    expect(embedEl.dataset.gitlabProcessed).toBeUndefined();
+    const { children: recovered } = await runProcessor(embedEl);
+    expect(recovered).toHaveLength(1);
+    expect(observeAndLoad).toHaveBeenCalledTimes(3);
   });
 });
