@@ -88,12 +88,12 @@ export function isTextSyncPath(path: string, allowlist: string[]): boolean {
  * segment (e.g. `.git`, `.github`, `.vscode`), except the configured Obsidian directory
  * (when `syncObsidianDir` is true, still ignoring nested `.git`).
  */
-export function isIgnoredPath(path: string, syncObsidianDir: boolean, configDir = '.obsidian'): boolean {
+export function isIgnoredPath(path: string, syncObsidianDir: boolean, configDir = ''): boolean {
   const normalized = normalizeVaultPath(path);
   if (!normalized) {
     return false;
   }
-  const normalizedConfigDir = normalizeVaultPath(configDir) || '.obsidian';
+  const normalizedConfigDir = normalizeVaultPath(configDir);
   const segments = normalized.split('/');
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
@@ -248,7 +248,7 @@ export function resolveRemoteImagePath(
  */
 export async function sha256Hex(content: string): Promise<string> {
   const encoded = new TextEncoder().encode(content);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', encoded);
+  const digest = await crypto.subtle.digest('SHA-256', encoded);
   const bytes = new Uint8Array(digest);
   let hex = '';
   for (let i = 0; i < bytes.length; i++) {

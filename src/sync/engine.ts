@@ -112,7 +112,7 @@ export class SyncEngine {
     this.vault = options.vault;
     this.saveState = options.saveState;
     this.now = options.now ?? (() => new Date());
-    this.configDir = options.configDir ?? '.obsidian';
+    this.configDir = options.configDir ?? '';
     this.onProgress = options.onProgress;
     const rawConc = options.downloadConcurrency;
     this.downloadConcurrency =

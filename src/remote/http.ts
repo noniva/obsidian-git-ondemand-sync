@@ -100,7 +100,7 @@ export async function sendRemoteRequest(opts: {
     let res: RequestUrlResponse;
     try {
       const timeoutPromise = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
+        timer = window.setTimeout(() => {
           timedOut = true;
           reject(new Error(`${opts.label} timed out after ${opts.timeoutMs}ms`));
         }, opts.timeoutMs);
@@ -123,7 +123,7 @@ export async function sendRemoteRequest(opts: {
       throw new Error(`${opts.label} request failed: ${message}`, { cause: err });
     } finally {
       if (timer !== undefined) {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
       }
     }
 

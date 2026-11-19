@@ -22,9 +22,9 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
 
   private scheduleTextSave(): void {
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
     }
-    this.saveTimer = setTimeout(() => {
+    this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
       void this.plugin.saveAndRefreshSettings();
     }, 300);
@@ -32,7 +32,7 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
 
   override hide(): void {
     if (this.saveTimer !== null) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
       void this.plugin.saveAndRefreshSettings();
     }
@@ -171,8 +171,8 @@ export class GitLabSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName('Sync .obsidian/ directory')
-      .setDesc('Include allowlisted text files inside .obsidian/ during sync.')
+      .setName(`Sync ${this.app.vault.configDir}/ directory`)
+      .setDesc(`Include allowlisted text files inside ${this.app.vault.configDir}/ during sync.`)
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.syncObsidianDir).onChange(async (value) => {
           this.plugin.settings.syncObsidianDir = value;

@@ -164,7 +164,7 @@ export function registerReadingViewImageProcessor(
     }
 
     const images: HTMLImageElement[] = [];
-    if (el instanceof HTMLImageElement) {
+    if (el.instanceOf(HTMLImageElement)) {
       images.push(el);
     }
     images.push(...Array.from(el.querySelectorAll<HTMLImageElement>('img')));

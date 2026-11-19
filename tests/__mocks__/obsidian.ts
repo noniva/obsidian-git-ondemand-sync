@@ -7,6 +7,10 @@ export const Platform = {
   isAndroidApp: false,
 };
 
+export function requireApiVersion(): boolean {
+  return true;
+}
+
 export const setEditorLivePreviewEffect = StateEffect.define<boolean>();
 export const editorLivePreviewField = StateField.define<boolean>({
   create: () => true,

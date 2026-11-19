@@ -81,7 +81,7 @@ export class OnDemandImageLoader {
 
   constructor(
     client: Pick<RemoteGitClient, 'getRawBinary'>,
-    blobApi: BlobUrlApi = globalThis.URL,
+    blobApi: BlobUrlApi = window.URL,
     maxConcurrent = 3,
     maxMemoryImages = 150,
     cacheOptions?: ImageCacheOptions,
@@ -285,7 +285,7 @@ export class OnDemandImageLoader {
     ref: string,
     fallbackRef?: string,
   ): () => void {
-    const ObserverCtor = globalThis.IntersectionObserver;
+    const ObserverCtor = window.IntersectionObserver;
     if (typeof ObserverCtor !== 'function') {
       return this.loadIntoElement(imgEl, repoPath, ref, fallbackRef);
     }
@@ -360,9 +360,9 @@ export class OnDemandImageLoader {
     }
     this.memoryImages.clear();
 
-    if (typeof globalThis.caches?.delete === 'function') {
+    if (typeof window.caches?.delete === 'function') {
       try {
-        await globalThis.caches.delete(PERSISTENT_CACHE_NAME);
+        await window.caches.delete(PERSISTENT_CACHE_NAME);
       } catch {
         // Ignore storage errors when clearing cache
       }
@@ -432,7 +432,7 @@ export class OnDemandImageLoader {
   private isPersistentCacheActive(): boolean {
     return (
       Boolean(this.cacheOptions?.isPersistentCacheEnabled?.()) &&
-      typeof globalThis.caches?.open === 'function'
+      typeof window.caches?.open === 'function'
     );
   }
 
@@ -453,7 +453,7 @@ export class OnDemandImageLoader {
       return null;
     }
     try {
-      const cache = await globalThis.caches.open(PERSISTENT_CACHE_NAME);
+      const cache = await window.caches.open(PERSISTENT_CACHE_NAME);
       const candidates =
         fallbackRef && fallbackRef !== ref ? [ref, fallbackRef] : [ref];
       for (const candidateRef of candidates) {
@@ -482,7 +482,7 @@ export class OnDemandImageLoader {
       return;
     }
     try {
-      const cache = await globalThis.caches.open(PERSISTENT_CACHE_NAME);
+      const cache = await window.caches.open(PERSISTENT_CACHE_NAME);
       const reqKey = buildCacheRequestKey(cacheKey, ref);
       await this.putCacheEntry(cache, reqKey, buffer, mimeType);
       await this.evictPersistentCache(cache);

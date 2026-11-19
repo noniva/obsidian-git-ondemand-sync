@@ -64,7 +64,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
       {
         getRawBinary: (filePath, ref) => this.client.getRawBinary(filePath, ref),
       },
-      globalThis.URL,
+      window.URL,
       3,
       50,
       {
@@ -143,7 +143,7 @@ export default class GitLabOnDemandSyncPlugin extends Plugin {
   }
 
   private getConfigDir(): string {
-    return normalizeVaultPath(this.app.vault.configDir || '.obsidian') || '.obsidian';
+    return normalizeVaultPath(this.app.vault.configDir);
   }
 
   refreshOpenEditors(): void {

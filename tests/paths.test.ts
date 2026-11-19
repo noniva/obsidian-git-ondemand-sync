@@ -31,9 +31,9 @@ describe('paths', () => {
     expect(isIgnoredPath('.github/PULL_REQUEST_TEMPLATE.md', true)).toBe(true);
     expect(isIgnoredPath('.vscode/notes.md', false)).toBe(true);
     expect(isIgnoredPath('notes/.hidden/secret.md', true)).toBe(true);
-    expect(isIgnoredPath('.obsidian/app.json', false)).toBe(true);
-    expect(isIgnoredPath('.obsidian/app.json', true)).toBe(false);
-    expect(isIgnoredPath('.obsidian/.git/config', true)).toBe(true);
+    expect(isIgnoredPath('.obsidian/app.json', false, '.obsidian')).toBe(true);
+    expect(isIgnoredPath('.obsidian/app.json', true, '.obsidian')).toBe(false);
+    expect(isIgnoredPath('.obsidian/.git/config', true, '.obsidian')).toBe(true);
     expect(isIgnoredPath('.custom-obsidian/app.json', true, '.custom-obsidian')).toBe(false);
     expect(isIgnoredPath('.obsidian/app.json', true, '.custom-obsidian')).toBe(true);
     expect(isIgnoredPath('notes/git-notes.md', false)).toBe(false);

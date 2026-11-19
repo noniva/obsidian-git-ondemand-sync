@@ -60,12 +60,17 @@ function createWorkspaceHarness(activeEditor?: Editor, options?: { deferLayoutRe
         getActiveViewOfType: vi.fn(() => (activeEditor ? { editor: activeEditor } : null)),
       },
       vault: {
+        configDir: '.obsidian',
         on: vi.fn((name: string, cb: (...args: any[]) => unknown) => {
           vaultListeners.set(name, cb);
           return { name, cb };
         }),
         readBinary,
         delete: deleteFile,
+        trash: deleteFile,
+      },
+      fileManager: {
+        trashFile: deleteFile,
       },
     },
     registerEvent,

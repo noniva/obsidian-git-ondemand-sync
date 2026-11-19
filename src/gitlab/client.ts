@@ -65,7 +65,7 @@ export class GitLabClient implements RemoteGitClient {
       config.maxRateLimitRetries >= 0
         ? Math.floor(config.maxRateLimitRetries)
         : 3;
-    this.sleep = config.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.sleep = config.sleep ?? ((ms) => new Promise((resolve) => window.setTimeout(resolve, ms)));
     this.onRateLimitWait = config.onRateLimitWait;
     this.requestFn = requestFn;
   }

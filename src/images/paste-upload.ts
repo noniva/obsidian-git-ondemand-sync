@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, TFile, type Editor, type Plugin } from 'obsidian';
+import { MarkdownView, Notice, requireApiVersion, TFile, type Editor, type Plugin } from 'obsidian';
 import { compressImageForUpload, type CompressImageOptions } from './compress';
 import type { OnDemandImageLoader } from './loader';
 import type { PluginSettings, RemoteGitClient, SyncState } from '../types';
@@ -388,7 +388,7 @@ async function handleVaultImageCreate(
   if (
     !deps.isEnabled() ||
     !(file instanceof TFile) ||
-    isIgnoredPath(file.path, deps.settings.syncObsidianDir, deps.configDir ?? '.obsidian') ||
+    isIgnoredPath(file.path, deps.settings.syncObsidianDir, deps.configDir ?? plugin.app.vault.configDir) ||
     !isImagePath(file.path)
   ) {
     return;
@@ -416,7 +416,11 @@ async function handleVaultImageCreate(
       result.repoPath,
       new Blob([result.bytes], { type: result.mimeType }),
     );
-    await plugin.app.vault.delete(file);
+    if (requireApiVersion('1.6.6')) {
+      await plugin.app.fileManager.trashFile(file);
+    } else {
+      await plugin.app.vault.trash(file, true);
+    }
 
     const editor = getActiveMarkdownEditor(plugin);
     if (editor) {

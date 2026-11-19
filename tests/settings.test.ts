@@ -99,7 +99,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('renders fields, hides token as password, and allows empty attachmentFolder', () => {
     const plugin = createMockPlugin({ attachmentFolder: 'attachments', token: 'glpat-secret' });
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     const tokenInput = findSettingRow(tab.containerEl, 'Personal Access Token').querySelector(
@@ -124,7 +124,7 @@ describe('GitLabSyncSettingTab', () => {
   it('debounces text edits by 300ms and flushes immediately on hide()', async () => {
     vi.useFakeTimers();
     const plugin = createMockPlugin({ provider: 'gitlab', apiUrl: 'https://gitlab.com' });
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     setTextValue(tab.containerEl, 'Project ID / Path', 'group/a');
@@ -155,7 +155,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('saves immediately when toggles change', async () => {
     const plugin = createMockPlugin();
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     toggleCheckbox(tab.containerEl, 'Sync .obsidian/ directory');
@@ -170,7 +170,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('manages Clear Conflict State button disabled/enabled states and keeps button enabled on error', async () => {
     const plugin = createMockPlugin({}, { activeConflictBranch: null });
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     const getClearBtn = () =>
@@ -216,7 +216,7 @@ describe('GitLabSyncSettingTab', () => {
     plugin.lastSyncError = 'GitLab API GET failed (401): Unauthorized';
     plugin.lastSyncStatus = `Failed: ${plugin.lastSyncError}`;
 
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     const statusRow = findSettingRow(tab.containerEl, 'Last Sync Status');
@@ -242,7 +242,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('toggles Git Provider dropdown, switches default URLs vs preserving custom Enterprise URL, and updates labels', async () => {
     const plugin = createMockPlugin();
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     // Default provider is GitHub
@@ -272,7 +272,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('renders persistent image cache controls and triggers clearImageCache()', async () => {
     const plugin = createMockPlugin();
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     toggleCheckbox(tab.containerEl, 'Persistent Image Cache');
@@ -293,7 +293,7 @@ describe('GitLabSyncSettingTab', () => {
 
   it('renders image compression controls and Clean Up Unused Images button', async () => {
     const plugin = createMockPlugin();
-    const tab = new GitLabSyncSettingTab({} as App, plugin);
+    const tab = new GitLabSyncSettingTab({ vault: { configDir: '.obsidian' } } as unknown as App, plugin);
     tab.display();
 
     toggleCheckbox(tab.containerEl, 'Optimize Images Before Upload');

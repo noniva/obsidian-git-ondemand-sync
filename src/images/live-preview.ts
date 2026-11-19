@@ -152,7 +152,7 @@ class RemoteImageWidget extends WidgetType {
 
   override ignoreEvent(event: Event): boolean {
     const target = event.target as Node | null;
-    const element = target instanceof Element ? target : (target?.parentElement ?? null);
+    const element = target?.instanceOf(Element) ? target : (target?.parentElement ?? null);
     return Boolean(
       element?.closest?.('.gitlab-img-error-box, .gitlab-img-status-box, .gitlab-img-reload-btn'),
     );
