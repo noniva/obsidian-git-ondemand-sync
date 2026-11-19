@@ -3,3 +3,8 @@ main.js
 *.js.map
 .superpowers/
 .DS_Store
+.env
+.env.*
+.secret/
+__pycache__/
+.pytest_cache/
