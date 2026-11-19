@@ -32,6 +32,8 @@ export interface SyncState {
   activeConflictBranch: string | null;
   files: Record<string, SyncedFileEntry>;
   remoteImagePaths: string[];
+  conflictPushedHashes?: Record<string, string>;
+  conflictDeletedPaths?: string[];
 }
 
 export interface GitLabTreeEntry {

@@ -25,6 +25,7 @@ export interface SyncEngineOptions {
   vault: VaultTextAdapter;
   saveState: () => Promise<void> | void;
   now?: () => Date;
+  configDir?: string;
 }
 
 function formatConflictBranchName(date: Date): string {
@@ -83,6 +84,7 @@ export class SyncEngine {
   private readonly vault: VaultTextAdapter;
   private readonly saveState: () => Promise<void> | void;
   private readonly now: () => Date;
+  private readonly configDir: string;
 
   constructor(options: SyncEngineOptions) {
     this.settings = options.settings;
@@ -91,6 +93,14 @@ export class SyncEngine {
     this.vault = options.vault;
     this.saveState = options.saveState;
     this.now = options.now ?? (() => new Date());
+    this.configDir = options.configDir ?? '.obsidian';
+  }
+
+  private isAllowlistedText(path: string): boolean {
+    return (
+      !isIgnoredPath(path, this.settings.syncObsidianDir, this.configDir) &&
+      isTextSyncPath(path, this.settings.textAllowlist)
+    );
   }
 
   /**
@@ -99,11 +109,7 @@ export class SyncEngine {
   async sync(): Promise<SyncResult> {
     const initialRemoteImages = new Set(this.state.remoteImagePaths);
     const rawLocalPaths = await this.vault.listTextFiles();
-    const localPaths = rawLocalPaths.filter(
-      (path) =>
-        !isIgnoredPath(path, this.settings.syncObsidianDir) &&
-        isTextSyncPath(path, this.settings.textAllowlist),
-    );
+    const localPaths = rawLocalPaths.filter((path) => this.isAllowlistedText(path));
 
     const isInitialSync = this.state.lastSyncedCommitSha === null;
     if (isInitialSync && localPaths.length > 0) {
@@ -119,7 +125,10 @@ export class SyncEngine {
     const remoteImagePaths: string[] = [];
 
     for (const entry of tree) {
-      if (entry.type !== 'blob' || isIgnoredPath(entry.path, this.settings.syncObsidianDir)) {
+      if (
+        entry.type !== 'blob' ||
+        isIgnoredPath(entry.path, this.settings.syncObsidianDir, this.configDir)
+      ) {
         continue;
       }
       if (isTextSyncPath(entry.path, this.settings.textAllowlist)) {
@@ -131,12 +140,24 @@ export class SyncEngine {
 
     let conflictTree: GitLabTreeEntry[] | null = null;
     if (this.state.activeConflictBranch) {
-      const conflictHeadSha = await this.client.getBranchHead(this.state.activeConflictBranch);
+      let conflictHeadSha: string;
+      try {
+        conflictHeadSha = await this.client.getBranchHead(this.state.activeConflictBranch);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (message.includes('(404)')) {
+          throw new Error(
+            `Conflict branch "${this.state.activeConflictBranch}" no longer exists on GitLab (likely merged and deleted). Open Settings and click "Clear Conflict State" to adopt the merged target branch.`,
+            { cause: err },
+          );
+        }
+        throw err;
+      }
       conflictTree = await this.client.getTreeRecursive(conflictHeadSha);
       for (const entry of conflictTree) {
         if (
           entry.type === 'blob' &&
-          !isIgnoredPath(entry.path, this.settings.syncObsidianDir) &&
+          !isIgnoredPath(entry.path, this.settings.syncObsidianDir, this.configDir) &&
           isImagePath(entry.path)
         ) {
           remoteImagePaths.push(entry.path);
@@ -165,12 +186,7 @@ export class SyncEngine {
       await this.resolveConvergedConflicts(plan, headSha, remoteTextFiles, localHashes);
     }
 
-    await this.applyPulls(plan, headSha, remoteTextFiles, isInitialSync);
-
-    if (plan.pullDownloads.length > 0 || plan.pullDeletes.length > 0) {
-      this.mergeRemoteImagePaths(this.state.remoteImagePaths, initialRemoteImages);
-      await this.saveState();
-    }
+    await this.applyPulls(plan, headSha, remoteTextFiles);
 
     let actions = buildPushActions(plan, localContents);
     if (plan.targetPushBranch === 'active-conflict' && conflictTree !== null) {
@@ -199,17 +215,14 @@ export class SyncEngine {
 
   /**
    * Clears the active conflict branch marker after the user merges it on desktop,
-   * and adopts converged remote file states from the target branch.
+   * adopting 3-way merged target branch files while preserving post-push local edits.
    */
   async clearConflictBranch(): Promise<void> {
     const headSha = await this.client.getBranchHead(this.settings.branch);
     const tree = await this.client.getTreeRecursive(headSha);
 
-    const rawLocalPaths = await this.vault.listTextFiles();
-    const localPaths = rawLocalPaths.filter(
-      (path) =>
-        !isIgnoredPath(path, this.settings.syncObsidianDir) &&
-        isTextSyncPath(path, this.settings.textAllowlist),
+    const localPaths = (await this.vault.listTextFiles()).filter((path) =>
+      this.isAllowlistedText(path),
     );
     const localHashes: LocalFileSnapshot = {};
     for (const path of localPaths) {
@@ -217,41 +230,98 @@ export class SyncEngine {
       localHashes[path] = await sha256Hex(content);
     }
 
-    const convergedUpdates: Array<[string, { blobSha: string; contentHash: string }]> = [];
-    for (const entry of tree) {
+    const conflictDeletedSet = new Set(this.state.conflictDeletedPaths ?? []);
+    const remoteTextEntries = tree.filter(
+      (entry) => entry.type === 'blob' && this.isAllowlistedText(entry.path),
+    );
+    const remoteTextPaths = new Set(remoteTextEntries.map((entry) => entry.path));
+
+    // Pre-fetch all changed target-branch files before touching disk or state.
+    const remoteFiles = new Map<string, { blobSha: string; text: string; hash: string }>();
+    for (const entry of remoteTextEntries) {
+      const localHash = localHashes[entry.path];
+      const existing = this.state.files[entry.path];
+      const pushedHash = this.state.conflictPushedHashes?.[entry.path];
+      const wasPushedDeleted = conflictDeletedSet.has(entry.path);
       if (
-        entry.type !== 'blob' ||
-        isIgnoredPath(entry.path, this.settings.syncObsidianDir) ||
-        !isTextSyncPath(entry.path, this.settings.textAllowlist)
+        existing &&
+        existing.blobSha === entry.id &&
+        localHash === existing.contentHash &&
+        !wasPushedDeleted &&
+        (pushedHash === undefined || pushedHash === localHash)
       ) {
         continue;
       }
-      const localHash = localHashes[entry.path];
-      if (localHash === undefined) {
-        continue;
-      }
-      const existing = this.state.files[entry.path];
-      if (existing && existing.blobSha === entry.id && existing.contentHash === localHash) {
-        continue;
-      }
+
       const remoteText = await this.client.getRawText(entry.path, headSha);
-      if (typeof remoteText === 'string' && (await sha256Hex(remoteText)) === localHash) {
-        convergedUpdates.push([
-          entry.path,
-          {
-            blobSha: entry.id,
-            contentHash: localHash,
-          },
-        ]);
+      if (typeof remoteText !== 'string') {
+        continue;
       }
+      remoteFiles.set(entry.path, {
+        blobSha: entry.id,
+        text: remoteText,
+        hash: await sha256Hex(remoteText),
+      });
     }
 
-    for (const [path, fileState] of convergedUpdates) {
-      this.state.files[path] = fileState;
+    for (const [path, remote] of remoteFiles) {
+      const localHash = localHashes[path];
+      if (
+        this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet) &&
+        localHash !== remote.hash
+      ) {
+        await this.vault.writeText(path, remote.text);
+      }
+      this.state.files[path] = {
+        blobSha: remote.blobSha,
+        contentHash: remote.hash,
+      };
     }
+
+    const trackedOrConflictPaths = new Set([
+      ...Object.keys(this.state.files),
+      ...Object.keys(this.state.conflictPushedHashes ?? {}),
+      ...(this.state.conflictDeletedPaths ?? []),
+    ]);
+    for (const path of trackedOrConflictPaths) {
+      if (remoteTextPaths.has(path) || !this.isAllowlistedText(path)) {
+        continue;
+      }
+      const localHash = localHashes[path];
+      if (
+        localHash !== undefined &&
+        this.isUntouchedSinceConflict(path, localHash, conflictDeletedSet)
+      ) {
+        await this.vault.deleteFile(path);
+      }
+      delete this.state.files[path];
+    }
+
     this.state.activeConflictBranch = null;
+    delete this.state.conflictPushedHashes;
+    delete this.state.conflictDeletedPaths;
     this.state.lastSyncedCommitSha = headSha;
     await this.saveState();
+  }
+
+  private isUntouchedSinceConflict(
+    path: string,
+    localHash: string | undefined,
+    conflictDeletedSet: Set<string>,
+  ): boolean {
+    if (conflictDeletedSet.has(path)) {
+      return localHash === undefined;
+    }
+    const pushedHash = this.state.conflictPushedHashes?.[path];
+    if (pushedHash !== undefined) {
+      return localHash === pushedHash;
+    }
+    const base = this.state.files[path];
+    if (base !== undefined) {
+      return localHash === base.contentHash;
+    }
+    // Brand-new remote-only path when absent locally.
+    return localHash === undefined;
   }
 
   private mergeRemoteImagePaths(collected: string[], initialRemoteImages: Set<string>): void {
@@ -343,11 +413,7 @@ export class SyncEngine {
     }
 
     for (const entry of conflictTree) {
-      if (
-        entry.type !== 'blob' ||
-        isIgnoredPath(entry.path, this.settings.syncObsidianDir) ||
-        !isTextSyncPath(entry.path, this.settings.textAllowlist)
-      ) {
+      if (entry.type !== 'blob' || !this.isAllowlistedText(entry.path)) {
         continue;
       }
       if (
@@ -370,34 +436,37 @@ export class SyncEngine {
     plan: SyncPlan,
     headSha: string,
     remoteTextFiles: Record<string, string>,
-    isInitialSync: boolean,
   ): Promise<void> {
-    if (isInitialSync) {
-      const downloaded = new Map<string, string>();
-      for (const path of plan.pullDownloads) {
-        downloaded.set(path, await this.client.getRawText(path, headSha));
-      }
-      for (const [path, content] of downloaded) {
-        await this.vault.writeText(path, content);
-        this.state.files[path] = {
-          blobSha: remoteTextFiles[path],
-          contentHash: await sha256Hex(content),
-        };
-      }
-    } else {
-      for (const path of plan.pullDownloads) {
-        const content = await this.client.getRawText(path, headSha);
-        await this.vault.writeText(path, content);
-        this.state.files[path] = {
-          blobSha: remoteTextFiles[path],
-          contentHash: await sha256Hex(content),
-        };
-      }
+    const downloaded = new Map<string, string>();
+    for (const path of plan.pullDownloads) {
+      downloaded.set(path, await this.client.getRawText(path, headSha));
     }
 
-    for (const path of plan.pullDeletes) {
-      await this.vault.deleteFile(path);
-      delete this.state.files[path];
+    if (downloaded.size === 0 && plan.pullDeletes.length === 0) {
+      return;
+    }
+
+    let mutated = false;
+    try {
+      for (const [path, content] of downloaded) {
+        const contentHash = await sha256Hex(content);
+        await this.vault.writeText(path, content);
+        this.state.files[path] = {
+          blobSha: remoteTextFiles[path],
+          contentHash,
+        };
+        mutated = true;
+      }
+
+      for (const path of plan.pullDeletes) {
+        await this.vault.deleteFile(path);
+        delete this.state.files[path];
+        mutated = true;
+      }
+    } finally {
+      if (mutated) {
+        await this.saveState();
+      }
     }
   }
 
@@ -415,6 +484,13 @@ export class SyncEngine {
     }
 
     if (plan.targetPushBranch === 'target') {
+      const latestHead = await this.client.getBranchHead(this.settings.branch);
+      if (latestHead !== headSha) {
+        throw new Error(
+          'Remote target branch moved during sync; please run sync again to merge or pull latest changes.',
+        );
+      }
+
       const newHeadSha = await this.client.createCommit({
         branch: this.settings.branch,
         commitMessage: 'Sync mobile vault changes',
@@ -460,6 +536,29 @@ export class SyncEngine {
     if (isNewConflictBranch) {
       this.state.activeConflictBranch = conflictBranch;
     }
+
+    const pushedHashes: Record<string, string> = isNewConflictBranch
+      ? {}
+      : { ...(this.state.conflictPushedHashes ?? {}) };
+    const deletedPaths = new Set<string>(
+      isNewConflictBranch ? [] : (this.state.conflictDeletedPaths ?? []),
+    );
+
+    for (const action of actions) {
+      if (action.action === 'delete') {
+        delete pushedHashes[action.file_path];
+        deletedPaths.add(action.file_path);
+      } else {
+        const hash = localHashes[action.file_path];
+        if (hash !== undefined) {
+          pushedHashes[action.file_path] = hash;
+        }
+        deletedPaths.delete(action.file_path);
+      }
+    }
+
+    this.state.conflictPushedHashes = pushedHashes;
+    this.state.conflictDeletedPaths = Array.from(deletedPaths).sort();
 
     return headSha;
   }

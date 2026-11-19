@@ -498,4 +498,196 @@ describe('SyncEngine', () => {
     expect(state.activeConflictBranch).toBe('mobile-conflict/20261118-213000');
     expect(saveState).not.toHaveBeenCalled();
   });
+
+  it('clearConflictBranch adopts 3-way merged target files while preserving post-push mobile edits and eliminating conflict loops', async () => {
+    const mobilePushed = 'line1\nmobile line2';
+    const mergedOnDesktop = 'line1\ndesktop line1.5\nmobile line2';
+    const newerMobileEdit = 'draft written after conflict push';
+    const files: Record<string, string> = {
+      'merged.md': mobilePushed,
+      'edited-later.md': newerMobileEdit,
+    };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/20261119-040000',
+      files: {
+        'merged.md': { blobSha: 'r0', contentHash: 'h0' },
+        'edited-later.md': { blobSha: 're0', contentHash: 'he0' },
+      },
+      remoteImagePaths: [],
+      conflictPushedHashes: {
+        'merged.md': await sha256Hex(mobilePushed),
+        'edited-later.md': await sha256Hex('older conflict push'),
+      },
+      conflictDeletedPaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c_merged'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'r_merged', name: 'merged.md', type: 'blob', path: 'merged.md', mode: '100644' },
+        { id: 're_merged', name: 'edited-later.md', type: 'blob', path: 'edited-later.md', mode: '100644' },
+        { id: 'r_brandnew', name: 'brandnew.md', type: 'blob', path: 'brandnew.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn(async (p: string) => {
+        if (p === 'merged.md') return mergedOnDesktop;
+        if (p === 'edited-later.md') return 'older remote text';
+        if (p === 'brandnew.md') return 'new remote';
+        return '';
+      }),
+      createCommit: vi.fn(),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+
+    const engine = new SyncEngine({ settings: DEFAULT_SETTINGS, state, client, vault, saveState: vi.fn() });
+    await engine.clearConflictBranch();
+
+    expect(files['merged.md']).toBe(mergedOnDesktop);
+    expect(files['brandnew.md']).toBe('new remote');
+    expect(files['edited-later.md']).toBe(newerMobileEdit);
+    expect(state.activeConflictBranch).toBeNull();
+    expect(state.conflictPushedHashes).toBeUndefined();
+    expect(state.lastSyncedCommitSha).toBe('c_merged');
+    expect(state.files['merged.md']).toEqual({ blobSha: 'r_merged', contentHash: await sha256Hex(mergedOnDesktop) });
+  });
+
+  it('gives actionable 404 error if conflict branch was deleted on GitLab, aborts incremental pull before disk write, and guards target TOCTOU head movement', async () => {
+    // 1. 404 on deleted activeConflictBranch
+    const state404: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: 'mobile-conflict/deleted',
+      files: {},
+      remoteImagePaths: [],
+    };
+    const client404 = {
+      getBranchHead: vi
+        .fn()
+        .mockResolvedValueOnce('c1')
+        .mockRejectedValueOnce(new Error('GitLab API GET failed (404): 404 Branch Not Found')),
+      getTreeRecursive: vi.fn().mockResolvedValue([]),
+      getRawText: vi.fn(),
+      createCommit: vi.fn(),
+    } as any;
+    const vaultEmpty = { listTextFiles: async () => [], readText: async () => '', writeText: vi.fn(), deleteFile: vi.fn() };
+    const engine404 = new SyncEngine({ settings: DEFAULT_SETTINGS, state: state404, client: client404, vault: vaultEmpty, saveState: vi.fn() });
+    await expect(engine404.sync()).rejects.toThrow(/Clear Conflict State/i);
+
+    // 2. Incremental pull failure must not write partial files to disk
+    const incFiles: Record<string, string> = {};
+    const incWrite = vi.fn(async (p: string, c: string) => { incFiles[p] = c; });
+    const incClient = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: '1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+        { id: '2', name: 'b.md', type: 'blob', path: 'b.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn().mockResolvedValueOnce('# A').mockRejectedValueOnce(new Error('Timeout')),
+      createCommit: vi.fn(),
+    } as any;
+    const incVault = { listTextFiles: async () => Object.keys(incFiles), readText: async (p: string) => incFiles[p], writeText: incWrite, deleteFile: vi.fn() };
+    const incState: SyncState = { lastSyncedCommitSha: 'c0', activeConflictBranch: null, files: {}, remoteImagePaths: [] };
+    await expect(new SyncEngine({ settings: DEFAULT_SETTINGS, state: incState, client: incClient, vault: incVault, saveState: vi.fn() }).sync()).rejects.toThrow('Timeout');
+    expect(incWrite).not.toHaveBeenCalled();
+
+    // 3. TOCTOU head check before target createCommit
+    const pushFiles: Record<string, string> = { 'new.md': 'local' };
+    const pushClient = {
+      getBranchHead: vi.fn().mockResolvedValueOnce('c0').mockResolvedValueOnce('c_desktop_moved'),
+      getTreeRecursive: vi.fn().mockResolvedValue([]),
+      getRawText: vi.fn(),
+      createCommit: vi.fn(),
+    } as any;
+    const pushVault = { listTextFiles: async () => Object.keys(pushFiles), readText: async (p: string) => pushFiles[p], writeText: vi.fn(), deleteFile: vi.fn() };
+    const pushState: SyncState = { lastSyncedCommitSha: 'c0', activeConflictBranch: null, files: {}, remoteImagePaths: [] };
+    await expect(new SyncEngine({ settings: DEFAULT_SETTINGS, state: pushState, client: pushClient, vault: pushVault, saveState: vi.fn() }).sync()).rejects.toThrow(/target branch moved/i);
+    expect(pushClient.createCommit).not.toHaveBeenCalled();
+  });
+
+  it('tracks conflictPushedHashes/conflictDeletedPaths, deletes remote-dropped files in clearConflictBranch, persists mid-apply pull state, and honors configDir', async () => {
+    // 1. Conflict push populates conflictPushedHashes and conflictDeletedPaths, and passes configDir
+    const pushedContent = 'mobile conflict note';
+    const files: Record<string, string> = {
+      'a.md': pushedContent,
+      '.custom-cfg/app.md': 'cfg',
+      '.obsidian/ignored.md': 'skip',
+    };
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {
+        'a.md': { blobSha: 'ra0', contentHash: 'ha0' },
+        'drop-me.md': { blobSha: 'rd0', contentHash: 'hd0' },
+      },
+      remoteImagePaths: [],
+    };
+    const client = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: 'ra1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+        { id: 'rd0', name: 'drop-me.md', type: 'blob', path: 'drop-me.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn(),
+      createCommit: vi.fn().mockResolvedValue('c_conf'),
+    } as any;
+    const vault = {
+      listTextFiles: async () => Object.keys(files),
+      readText: async (p: string) => files[p],
+      writeText: async (p: string, c: string) => { files[p] = c; },
+      deleteFile: async (p: string) => { delete files[p]; },
+    };
+    const settings = { ...DEFAULT_SETTINGS, syncObsidianDir: true };
+    const engine = new SyncEngine({ settings, state, client, vault, saveState: vi.fn(), configDir: '.custom-cfg' });
+    await engine.sync();
+
+    expect(state.conflictPushedHashes).toEqual({
+      'a.md': await sha256Hex(pushedContent),
+      '.custom-cfg/app.md': await sha256Hex('cfg'),
+    });
+    expect(state.conflictDeletedPaths).toEqual(['drop-me.md']);
+
+    // 2. clearConflictBranch removes remote-deleted untouched files while keeping post-push edits
+    files['edited-orphan.md'] = 'keep local edit';
+    state.conflictPushedHashes!['edited-orphan.md'] = await sha256Hex('before edit');
+    client.getBranchHead.mockResolvedValue('c_merged');
+    client.getTreeRecursive.mockResolvedValue([]);
+    await engine.clearConflictBranch();
+
+    expect(files['a.md']).toBeUndefined();
+    expect(files['edited-orphan.md']).toBe('keep local edit');
+    expect(state.files['a.md']).toBeUndefined();
+    expect(state.files['edited-orphan.md']).toBeUndefined();
+    expect(state.conflictDeletedPaths).toBeUndefined();
+
+    // 3. Mid-apply disk error persists already-written files via saveState in finally
+    const incFiles: Record<string, string> = {};
+    const incSave = vi.fn();
+    const incState: SyncState = { lastSyncedCommitSha: 'c0', activeConflictBranch: null, files: {}, remoteImagePaths: [] };
+    const incClient = {
+      getBranchHead: vi.fn().mockResolvedValue('c1'),
+      getTreeRecursive: vi.fn().mockResolvedValue([
+        { id: '1', name: 'a.md', type: 'blob', path: 'a.md', mode: '100644' },
+        { id: '2', name: 'b.md', type: 'blob', path: 'b.md', mode: '100644' },
+      ]),
+      getRawText: vi.fn().mockResolvedValueOnce('# A').mockResolvedValueOnce('# B'),
+      createCommit: vi.fn(),
+    } as any;
+    const incVault = {
+      listTextFiles: async () => Object.keys(incFiles),
+      readText: async (p: string) => incFiles[p],
+      writeText: vi.fn()
+        .mockImplementationOnce(async (p: string, c: string) => { incFiles[p] = c; })
+        .mockRejectedValueOnce(new Error('Disk full')),
+      deleteFile: vi.fn(),
+    };
+    await expect(
+      new SyncEngine({ settings: DEFAULT_SETTINGS, state: incState, client: incClient, vault: incVault, saveState: incSave }).sync(),
+    ).rejects.toThrow('Disk full');
+    expect(incState.files['a.md']?.blobSha).toBe('1');
+    expect(incState.files['b.md']).toBeUndefined();
+    expect(incSave).toHaveBeenCalledTimes(1);
+  });
 });
