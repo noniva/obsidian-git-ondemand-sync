@@ -592,4 +592,240 @@ describe('registerMobileImageUpload', () => {
     expect(state.remoteImagePaths).toHaveLength(2);
     expect(new Set(state.remoteImagePaths).size).toBe(2);
   });
+
+  it('intercepts editor-drop image when file.type is empty but filename has an image extension', async () => {
+    const { plugin, listeners } = createWorkspaceHarness();
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const onUploaded = vi.fn();
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, branch: 'main', attachmentFolder: 'attachments' },
+      state,
+      client: { createCommit: vi.fn().mockResolvedValue('c_empty_mime') } as any,
+      loader: { registerMemoryImage: vi.fn().mockReturnValue('blob:mem-empty') } as any,
+      saveState: vi.fn().mockResolvedValue(undefined),
+      isEnabled: () => true,
+      onUploaded,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const dropHandler = listeners.get('editor-drop')!;
+
+    const file = createMockFile([1, 2, 3], '', 'photo.png');
+    const preventDefault = vi.fn();
+    const editor = { replaceSelection: vi.fn() } as unknown as Editor;
+
+    await dropHandler(
+      {
+        defaultPrevented: false,
+        preventDefault,
+        dataTransfer: { files: [file], items: [] },
+      } as unknown as DragEvent,
+      editor,
+    );
+
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(deps.client.createCommit).toHaveBeenCalledTimes(1);
+    expect(deps.loader.registerMemoryImage).toHaveBeenCalledWith(
+      expect.stringMatching(/^attachments\/Pasted image \d{14}\.png$/),
+      expect.objectContaining({ type: 'image/png' }),
+    );
+    expect(editor.replaceSelection).toHaveBeenCalledWith(
+      expect.stringMatching(/^!\[\[attachments\/Pasted image \d{14}\.png\]\]$/),
+    );
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+  });
+
+  function createStatefulEditor(initialDoc: string, initialCursor = 0) {
+    let doc = initialDoc;
+    let cursor = initialCursor;
+    const posToOffset = (pos: { line: number; ch: number }): number => {
+      const lines = doc.split('\n');
+      let off = 0;
+      for (let i = 0; i < pos.line; i++) {
+        off += (lines[i]?.length ?? 0) + 1;
+      }
+      return off + pos.ch;
+    };
+    const offsetToPos = vi.fn((offset: number) => {
+      const before = doc.slice(0, offset);
+      const lines = before.split('\n');
+      return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+    });
+    const setValue = vi.fn((val: string) => {
+      doc = val;
+    });
+    const replaceSelection = vi.fn((text: string) => {
+      doc = doc.slice(0, cursor) + text + doc.slice(cursor);
+      cursor += text.length;
+    });
+    const replaceRange = vi.fn(
+      (text: string, from: { line: number; ch: number }, to?: { line: number; ch: number }) => {
+        const fromOff = posToOffset(from);
+        const toOff = to ? posToOffset(to) : fromOff;
+        doc = doc.slice(0, fromOff) + text + doc.slice(toOff);
+      },
+    );
+    return {
+      editor: {
+        getValue: vi.fn(() => doc),
+        setValue,
+        offsetToPos,
+        replaceSelection,
+        replaceRange,
+      } as unknown as Editor,
+      getDoc: () => doc,
+      setDoc: (next: string) => {
+        doc = next;
+      },
+      appendAtEnd: (text: string) => {
+        doc += text;
+        cursor = doc.length;
+      },
+      setValue,
+      replaceRange,
+    };
+  }
+
+  it('replaces only placeholder marker range on async editor-paste even if cursor moves, and removes marker on offline failure', async () => {
+    const { plugin, listeners } = createWorkspaceHarness();
+    let resolveCommit!: (sha: string) => void;
+    const createCommit = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveCommit = resolve;
+        }),
+    );
+    const onUploaded = vi.fn();
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, attachmentFolder: 'attachments' },
+      state,
+      client: { createCommit } as any,
+      loader: { registerMemoryImage: vi.fn().mockReturnValue('blob:mem-async') } as any,
+      saveState: vi.fn().mockResolvedValue(undefined),
+      isEnabled: () => true,
+      onUploaded,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const pasteHandler = listeners.get('editor-paste')!;
+
+    // 1. Slow paste succeeds after user moves cursor and edits end of note
+    const ed1 = createStatefulEditor('Line 1\nInsert here: \nLine 3', 'Line 1\nInsert here: '.length);
+    const pastePromise = pasteHandler(
+      {
+        defaultPrevented: false,
+        preventDefault: vi.fn(),
+        clipboardData: { files: [createMockFile([1, 2], 'image/png')], items: [] },
+      } as unknown as ClipboardEvent,
+      ed1.editor,
+    );
+
+    await Promise.resolve();
+    expect(ed1.getDoc()).toMatch(/<!-- uploading-gitlab-image-\d+ -->/);
+    ed1.appendAtEnd(' + tail edit');
+
+    resolveCommit('c_async_1');
+    await pastePromise;
+
+    expect(ed1.replaceRange).toHaveBeenCalledTimes(1);
+    expect(ed1.getDoc()).toMatch(
+      /^Line 1\nInsert here: !\[\[attachments\/Pasted image \d{14}\.png\]\]\nLine 3 \+ tail edit$/,
+    );
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+
+    // 2. Offline failure removes placeholder marker cleanly
+    deps.client = { createCommit: vi.fn().mockRejectedValue(new Error('Network offline')) } as any;
+    const ed2 = createStatefulEditor('Before After', 'Before '.length);
+    await pasteHandler(
+      {
+        defaultPrevented: false,
+        preventDefault: vi.fn(),
+        clipboardData: { files: [createMockFile([1, 2], 'image/png')], items: [] },
+      } as unknown as ClipboardEvent,
+      ed2.editor,
+    );
+
+    expect(ed2.replaceRange).toHaveBeenCalledWith(
+      '',
+      expect.objectContaining({ line: 0, ch: 7 }),
+      expect.any(Object),
+    );
+    expect(ed2.getDoc()).toBe('Before After');
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+    expect(noticeMessages).toHaveLength(1);
+    expect(noticeMessages[0]).toMatch(/offline/i);
+  });
+
+  it('uses targeted editor.replaceRange in handleVaultImageCreate when supported and calls deps.onUploaded', async () => {
+    const ed = createStatefulEditor('Line 0\nPhoto: ![[Pasted image 999.heic]]\nLine 2');
+    const { plugin, vaultListeners, readBinary, deleteFile } = createWorkspaceHarness(ed.editor);
+    readBinary.mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+
+    const onUploaded = vi.fn();
+    const state: SyncState = {
+      lastSyncedCommitSha: 'c0',
+      activeConflictBranch: null,
+      files: {},
+      remoteImagePaths: [],
+    };
+    const deps: PasteUploadDeps = {
+      settings: { ...DEFAULT_SETTINGS, attachmentFolder: 'attachments', syncObsidianDir: false },
+      state,
+      client: { createCommit: vi.fn().mockResolvedValue('c_range') } as any,
+      loader: { registerMemoryImage: vi.fn().mockReturnValue('blob:cam-range') } as any,
+      saveState: vi.fn().mockResolvedValue(undefined),
+      isEnabled: () => true,
+      configDir: '.custom-obsidian',
+      onUploaded,
+    };
+
+    registerMobileImageUpload(plugin, () => deps);
+    const createHandler = vaultListeners.get('create')!;
+
+    const tempFile = new TFile();
+    tempFile.path = 'Pasted image 999.heic';
+    tempFile.name = 'Pasted image 999.heic';
+    tempFile.extension = 'heic';
+
+    await createHandler(tempFile);
+
+    expect(ed.setValue).not.toHaveBeenCalled();
+    expect(ed.replaceRange).toHaveBeenCalledWith(
+      expect.stringMatching(/^!\[\[attachments\/Pasted image \d{14}\.heic\]\]$/),
+      { line: 1, ch: 7 },
+      { line: 1, ch: 33 },
+    );
+    expect(ed.getDoc()).toMatch(/^Line 0\nPhoto: !\[\[attachments\/Pasted image \d{14}\.heic\]\]\nLine 2$/);
+    expect(deleteFile).toHaveBeenCalledWith(tempFile);
+    expect(onUploaded).toHaveBeenCalledTimes(1);
+
+    // Also replaces percent-encoded markdown link and respects custom configDir
+    ed.setDoc('Shot: ![cam](attachments/camera%20shot.jpg)');
+    const mdFile = new TFile();
+    mdFile.path = 'attachments/camera shot.jpg';
+    mdFile.name = 'camera shot.jpg';
+    mdFile.extension = 'jpg';
+    await createHandler(mdFile);
+    expect(ed.setValue).not.toHaveBeenCalled();
+    expect(ed.getDoc()).toMatch(/^Shot: !\[\[attachments\/Pasted image \d{14}\.jpg\]\]$/);
+    expect(onUploaded).toHaveBeenCalledTimes(2);
+
+    const ignoredCustom = new TFile();
+    ignoredCustom.path = '.custom-obsidian/themes/bg.png';
+    ignoredCustom.name = 'bg.png';
+    ignoredCustom.extension = 'png';
+    await createHandler(ignoredCustom);
+    expect(deps.client.createCommit).toHaveBeenCalledTimes(2);
+  });
 });

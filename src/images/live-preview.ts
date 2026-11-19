@@ -1,4 +1,5 @@
-import { RangeSetBuilder, type Extension } from '@codemirror/state';
+import { syntaxTree } from '@codemirror/language';
+import { RangeSetBuilder, StateEffect, type Extension } from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
@@ -11,9 +12,27 @@ import { editorInfoField, editorLivePreviewField } from 'obsidian';
 import type { ImageRenderContext } from './reading-view';
 import { isImagePath, normalizeVaultPath, parseImageEmbed, resolveRemoteImagePath } from '../utils/paths';
 
+/**
+ * CodeMirror state effect dispatched when open Live Preview editors should rebuild
+ * remote image decorations (for example after sync or paste upload updates `remoteImagePaths`).
+ */
+export const refreshRemoteImagesEffect = StateEffect.define<void>();
+
 const IMAGE_EMBED_RE =
-  /!\[\[([^\]]+)\]\]|!\[([^\]]*)\]\((?:<([^>]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/g;
+  /!\[\[([^\]]+)\]\]|!\[([^\]]*)\]\((?:<([^>]+)>|([^()\s]*(?:\([^()\s]*\)[^()\s]*)*))(?:\s+"[^"]*")?\)/g;
 const ALT_SIZE_RE = /(?:^|\|)(\d+)(?:x\d+)?$/;
+const CODE_NODE_NAMES = [
+  'codeblock',
+  'hmd-codeblock',
+  'hypermd-codeblock',
+  'inlinecode',
+  'inline-code',
+  'fencedcode',
+  'codeinfo',
+  'codemarks',
+  'codemark',
+  'codetext',
+];
 
 const widgetCleanups = new WeakMap<HTMLElement, () => void>();
 
@@ -52,6 +71,21 @@ function parseMarkdownAlt(rawAlt: string): { alt: string; width?: number } {
 function selectionOverlapsRange(view: EditorView, from: number, to: number): boolean {
   for (const range of view.state.selection.ranges) {
     if (range.from <= to && range.to >= from) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isInsideCodeContext(view: EditorView, pos: number): boolean {
+  const tree = syntaxTree(view.state);
+  for (
+    let node: ReturnType<typeof tree.resolveInner> | null = tree.resolveInner(pos, 1);
+    node;
+    node = node.parent
+  ) {
+    const lowerName = node.name.toLowerCase();
+    if (CODE_NODE_NAMES.some((codeName) => lowerName.includes(codeName))) {
       return true;
     }
   }
@@ -166,7 +200,7 @@ function buildDecorations(view: EditorView, getContext: () => ImageRenderContext
         const matchStart = line.from + match.index;
         const matchEnd = matchStart + match[0].length;
 
-        if (selectionOverlapsRange(view, matchStart, matchEnd)) {
+        if (selectionOverlapsRange(view, matchStart, matchEnd) || isInsideCodeContext(view, matchStart)) {
           continue;
         }
 
@@ -177,12 +211,17 @@ function buildDecorations(view: EditorView, getContext: () => ImageRenderContext
           continue;
         }
 
-        const resolved = resolveRemoteImagePath(parsed.target, noteDir, ctx.state.remoteImagePaths);
+        const resolved = resolveRemoteImagePath(
+          parsed.target,
+          noteDir,
+          ctx.state.remoteImagePaths,
+          { decodeTarget: false },
+        );
         if (!resolved || ctx.isLocalFilePresent(resolved)) {
           continue;
         }
 
-        let alt = '';
+        let alt = parsed.alt ?? '';
         let width = parsed.width;
         if (!isWikilink) {
           const mdAlt = parseMarkdownAlt(match[2] ?? '');
@@ -220,12 +259,16 @@ export function createLivePreviewImageExtension(getContext: () => ImageRenderCon
         const livePreviewChanged =
           update.startState.field(editorLivePreviewField, false) !==
           update.state.field(editorLivePreviewField, false);
+        const refreshRequested = update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(refreshRemoteImagesEffect)),
+        );
 
         if (
           update.docChanged ||
           update.viewportChanged ||
           update.selectionSet ||
-          livePreviewChanged
+          livePreviewChanged ||
+          refreshRequested
         ) {
           this.decorations = buildDecorations(update.view, getContext);
         }

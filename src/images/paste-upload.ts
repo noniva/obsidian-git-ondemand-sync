@@ -11,6 +11,8 @@ export interface PasteUploadDeps {
   loader: OnDemandImageLoader;
   saveState: () => Promise<void>;
   isEnabled: () => boolean;
+  configDir?: string;
+  onUploaded?: () => void;
 }
 
 export interface UploadPastedImageParams {
@@ -117,6 +119,16 @@ function buildUniqueRepoPath(
   }
 }
 
+let uploadMarkerCounter = 0;
+
+function isImageUploadFile(file: File, itemType?: string): boolean {
+  return (
+    (itemType?.toLowerCase().startsWith('image/') ?? false) ||
+    (file.type?.toLowerCase().startsWith('image/') ?? false) ||
+    isImagePath(file.name ?? '')
+  );
+}
+
 function extractImageFiles(transfer: DataTransfer | null | undefined): File[] {
   if (!transfer) {
     return [];
@@ -125,7 +137,7 @@ function extractImageFiles(transfer: DataTransfer | null | undefined): File[] {
   const images: File[] = [];
   if (transfer.files && transfer.files.length > 0) {
     for (const file of Array.from(transfer.files)) {
-      if (file.type && file.type.toLowerCase().startsWith('image/')) {
+      if (isImageUploadFile(file)) {
         images.push(file);
       }
     }
@@ -136,9 +148,9 @@ function extractImageFiles(transfer: DataTransfer | null | undefined): File[] {
 
   if (transfer.items && transfer.items.length > 0) {
     for (const item of Array.from(transfer.items)) {
-      if (item.kind === 'file' && item.type.toLowerCase().startsWith('image/')) {
+      if (item.kind === 'file') {
         const file = item.getAsFile();
-        if (file) {
+        if (file && isImageUploadFile(file, item.type)) {
           images.push(file);
         }
       }
@@ -171,13 +183,26 @@ async function handleImageTransfer(
   // Prevent Obsidian from persisting pasted/dropped images to local vault storage.
   evt.preventDefault();
 
+  const canTrackRange =
+    typeof editor.getValue === 'function' &&
+    typeof editor.offsetToPos === 'function' &&
+    typeof editor.replaceRange === 'function';
+  const marker = canTrackRange ? `<!-- uploading-gitlab-image-${++uploadMarkerCounter} -->` : '';
+  if (marker) {
+    editor.replaceSelection(marker);
+  }
+
   const branch = deps.state.activeConflictBranch ?? (deps.settings.branch || 'main');
+  const wikilinks: string[] = [];
   let insertedCount = 0;
 
   try {
     for (const file of imageFiles) {
       const bytes = await file.arrayBuffer();
-      const mimeType = file.type || 'image/png';
+      const mimeType =
+        file.type && file.type.toLowerCase().startsWith('image/')
+          ? file.type
+          : mimeTypeFromExtension(file.name || '');
       const result = await uploadPastedImage({
         bytes,
         mimeType,
@@ -189,12 +214,34 @@ async function handleImageTransfer(
       });
 
       deps.loader.registerMemoryImage(result.repoPath, new Blob([bytes], { type: mimeType }));
-      editor.replaceSelection(insertedCount > 0 ? `\n${result.wikilink}` : result.wikilink);
-      insertedCount++;
+      if (canTrackRange) {
+        wikilinks.push(result.wikilink);
+      } else {
+        editor.replaceSelection(insertedCount > 0 ? `\n${result.wikilink}` : result.wikilink);
+        insertedCount++;
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     new Notice(`Failed to upload image to GitLab: ${message}`);
+  } finally {
+    if (marker) {
+      const replacement = wikilinks.join('\n');
+      const content = editor.getValue();
+      const idx = content.indexOf(marker);
+      if (idx >= 0) {
+        editor.replaceRange(
+          replacement,
+          editor.offsetToPos(idx),
+          editor.offsetToPos(idx + marker.length),
+        );
+      } else if (replacement) {
+        editor.replaceSelection(replacement);
+      }
+    }
+    if (wikilinks.length > 0 || insertedCount > 0) {
+      deps.onUploaded?.();
+    }
   }
 }
 
@@ -271,6 +318,50 @@ function getActiveMarkdownEditor(plugin: Plugin): Editor | null {
   return activeEditor?.editor ?? null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function encodePathSegments(path: string): string {
+  return path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
+function findTempImageEmbedRange(content: string, file: TFile): { from: number; to: number } | null {
+  const wikilinks = [`![[${file.path}]]`, ...(file.name ? [`![[${file.name}]]`] : [])];
+  for (const link of wikilinks) {
+    const idx = content.indexOf(link);
+    if (idx >= 0) {
+      return { from: idx, to: idx + link.length };
+    }
+  }
+
+  const candidates = Array.from(
+    new Set([
+      file.path,
+      encodeURI(file.path),
+      encodePathSegments(file.path),
+      file.name,
+      encodeURI(file.name),
+      encodePathSegments(file.name),
+    ]),
+  ).filter(Boolean);
+
+  for (const target of candidates) {
+    const escaped = escapeRegExp(target);
+    const mdMatch = new RegExp(
+      `!\\[[^\\]]*\\]\\((?:<${escaped}>|${escaped})(?:\\s+"[^"]*")?\\)`,
+    ).exec(content);
+    if (mdMatch) {
+      return { from: mdMatch.index, to: mdMatch.index + mdMatch[0].length };
+    }
+  }
+
+  return null;
+}
+
 async function handleVaultImageCreate(
   file: unknown,
   plugin: Plugin,
@@ -280,7 +371,7 @@ async function handleVaultImageCreate(
   if (
     !deps.isEnabled() ||
     !(file instanceof TFile) ||
-    isIgnoredPath(file.path, deps.settings.syncObsidianDir) ||
+    isIgnoredPath(file.path, deps.settings.syncObsidianDir, deps.configDir ?? '.obsidian') ||
     !isImagePath(file.path)
   ) {
     return;
@@ -307,17 +398,25 @@ async function handleVaultImageCreate(
     if (editor) {
       const content = editor.getValue();
       if (!content.includes(result.repoPath)) {
-        const pathLink = `![[${file.path}]]`;
-        const nameLink = `![[${file.name}]]`;
-        if (content.includes(pathLink)) {
-          editor.setValue(content.replace(pathLink, result.wikilink));
-        } else if (content.includes(nameLink)) {
-          editor.setValue(content.replace(nameLink, result.wikilink));
+        const range = findTempImageEmbedRange(content, file);
+        if (range) {
+          if (typeof editor.offsetToPos === 'function' && typeof editor.replaceRange === 'function') {
+            editor.replaceRange(
+              result.wikilink,
+              editor.offsetToPos(range.from),
+              editor.offsetToPos(range.to),
+            );
+          } else {
+            editor.setValue(
+              content.slice(0, range.from) + result.wikilink + content.slice(range.to),
+            );
+          }
         } else {
           editor.replaceSelection(result.wikilink);
         }
       }
     }
+    deps.onUploaded?.();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     new Notice(`Failed to upload image to GitLab: ${message}`);

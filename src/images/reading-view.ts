@@ -98,7 +98,12 @@ export function registerReadingViewImageProcessor(
         continue;
       }
 
-      const resolved = resolveRemoteImagePath(parsed.target, noteDir, ctx.state.remoteImagePaths);
+      const resolved = resolveRemoteImagePath(
+        parsed.target,
+        noteDir,
+        ctx.state.remoteImagePaths,
+        { decodeTarget: false },
+      );
       if (!resolved || ctx.isLocalFilePresent(resolved)) {
         continue;
       }
@@ -110,7 +115,7 @@ export function registerReadingViewImageProcessor(
         parseWidthAttr(altAttr);
 
       const imgEl = document.createElement('img');
-      applyImageAttributes(imgEl, altAttr, width);
+      applyImageAttributes(imgEl, parsed.alt ?? altAttr, width);
 
       embedEl.dataset.gitlabProcessed = 'true';
       embedEl.classList.remove('is-unresolved');
@@ -137,7 +142,12 @@ export function registerReadingViewImageProcessor(
         continue;
       }
 
-      const resolved = resolveRemoteImagePath(parsed.target, noteDir, ctx.state.remoteImagePaths);
+      const resolved = resolveRemoteImagePath(
+        parsed.target,
+        noteDir,
+        ctx.state.remoteImagePaths,
+        { decodeTarget: false },
+      );
       if (!resolved || ctx.isLocalFilePresent(resolved)) {
         continue;
       }
@@ -148,7 +158,7 @@ export function registerReadingViewImageProcessor(
         parseWidthAttr(imgEl.getAttribute('width')) ??
         parseWidthAttr(altAttr);
 
-      applyImageAttributes(imgEl, altAttr, width);
+      applyImageAttributes(imgEl, parsed.alt ?? altAttr, width);
       imgEl.dataset.gitlabProcessed = 'true';
       imgEl.removeAttribute('src');
 
