@@ -75,12 +75,20 @@ export interface CreateCommitParams {
   startSha?: string;
 }
 
+export interface RemoteCompareEntry {
+  path: string;
+  previousPath?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed';
+  blobSha?: string;
+}
+
 export interface RemoteGitClient {
   getBranchHead(branch: string): Promise<string>;
   getTreeRecursive(
     ref: string,
     onPage?: (info: { page: number; totalPages?: number; entries: number }) => void,
   ): Promise<RemoteTreeEntry[]>;
+  compareCommits?(fromRef: string, toRef: string): Promise<RemoteCompareEntry[] | null>;
   getRawText(filePath: string, ref: string): Promise<string>;
   getRawTextsBatch?(filePaths: string[], ref: string): Promise<Map<string, string>>;
   getRawBinary(filePath: string, ref: string): Promise<ArrayBuffer>;

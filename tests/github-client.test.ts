@@ -412,4 +412,27 @@ describe('GitHubClient', () => {
     expect(sha).toBe('new-commit-sha');
     expect(postRefsCalls).toEqual([{ ref: 'refs/heads/conflict/branch', sha: 'new-commit-sha' }]);
   });
+
+  it('compares commits via GitHub /compare/:base...:head and returns null on 404', async () => {
+    const req = vi.fn().mockResolvedValue(
+      makeResponse({
+        json: {
+          files: [
+            { filename: 'a.md', status: 'modified', sha: 'sha-a' },
+            { filename: 'new.md', previous_filename: 'old.md', status: 'renamed', sha: 'sha-new' },
+            { filename: 'gone.md', status: 'removed' },
+          ],
+        },
+      }),
+    );
+    const client = new GitHubClient(cfg, req);
+    expect(await client.compareCommits('c1', 'c2')).toEqual([
+      { path: 'a.md', status: 'modified', blobSha: 'sha-a' },
+      { path: 'new.md', previousPath: 'old.md', status: 'renamed', blobSha: 'sha-new' },
+      { path: 'gone.md', status: 'deleted' },
+    ]);
+
+    const req404 = vi.fn().mockResolvedValue(makeResponse({ status: 404, text: 'Not Found' }));
+    expect(await new GitHubClient(cfg, req404).compareCommits('c1', 'c2')).toBeNull();
+  });
 });

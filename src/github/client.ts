@@ -6,7 +6,12 @@ import {
   type RequestUrlFn,
   type RequestUrlResponse,
 } from '../remote/http';
-import type { CreateCommitParams, RemoteGitClient, RemoteTreeEntry } from '../types';
+import type {
+  CreateCommitParams,
+  RemoteCompareEntry,
+  RemoteGitClient,
+  RemoteTreeEntry,
+} from '../types';
 
 const GITHUB_API_VERSION = '2022-11-28';
 const BLOB_CREATE_CONCURRENCY = 4;
@@ -145,6 +150,60 @@ export class GitHubClient implements RemoteGitClient {
     }
 
     onPage?.({ page: 1, totalPages: 1, entries: entries.length });
+    return entries;
+  }
+
+  /**
+   * Compares two refs via GitHub `/compare/:base...:head`.
+   * Returns `null` on 404 or >= 300 files (GitHub truncation threshold) so callers fall back to `getTreeRecursive`.
+   */
+  async compareCommits(fromRef: string, toRef: string): Promise<RemoteCompareEntry[] | null> {
+    let res: RequestUrlResponse;
+    try {
+      res = await this.repoRequest(
+        `/compare/${encodeURIComponent(fromRef)}...${encodeURIComponent(toRef)}`,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('(404)')) {
+        return null;
+      }
+      throw err;
+    }
+
+    const data = res.json as {
+      files?: Array<{
+        filename?: string;
+        previous_filename?: string;
+        status?: string;
+        sha?: string;
+      }>;
+    } | null;
+
+    if (!data || !Array.isArray(data.files) || data.files.length >= 300) {
+      return null;
+    }
+
+    const entries: RemoteCompareEntry[] = [];
+    for (const f of data.files) {
+      if (!f.filename) {
+        continue;
+      }
+      if (f.status === 'removed') {
+        entries.push({ path: f.filename, status: 'deleted' });
+      } else if (f.status === 'renamed' && f.previous_filename) {
+        entries.push({
+          path: f.filename,
+          previousPath: f.previous_filename,
+          status: 'renamed',
+          blobSha: f.sha,
+        });
+      } else if (f.status === 'added') {
+        entries.push({ path: f.filename, status: 'added', blobSha: f.sha });
+      } else {
+        entries.push({ path: f.filename, status: 'modified', blobSha: f.sha });
+      }
+    }
+
     return entries;
   }
 

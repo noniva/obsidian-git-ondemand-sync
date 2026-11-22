@@ -160,8 +160,15 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
     files['notes/drop-in-merge.md'] = 'mobile draft dropped by desktop merge';
     files['notes/edit-after-push.md'] = 'v1 pushed to conflict branch';
 
-    // 3. Mobile sync creates mobile-conflict/... from baseCommitSha and preserves Mobile edits on disk
+    // 3. Mobile sync falls back to mobile-conflict/... when base commit raw fetch is unavailable (404)
+    const rawSpy = vi.spyOn(client, 'getRawText').mockImplementation(async (filePath, ref) => {
+      if (ref === baseCommitSha) {
+        throw new Error('GitLab API error (404): Not Found');
+      }
+      return GitLabClient.prototype.getRawText.call(client, filePath, ref);
+    });
     const conflictRes = await engine.sync();
+    rawSpy.mockRestore();
     expect(conflictRes.conflictBranch).toBe('mobile-conflict/20261119-061500');
     expect(conflictRes.pushed).toBe(4);
     expect(state.activeConflictBranch).toBe('mobile-conflict/20261119-061500');
@@ -365,13 +372,11 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
 
     const conflictAfterToctou = await engine.sync();
     expect(saveState).toHaveBeenCalledTimes(1);
-    expect(conflictAfterToctou.conflictBranch).toBe('mobile-conflict/20261119-062000');
+    expect(conflictAfterToctou.conflictBranch).toBeNull();
     expect(decodeText(server.getBranchFiles('main')['notes/base.md'])).toBe(
-      'desktop concurrent update',
+      'desktop concurrent update\nmobile edit',
     );
-    expect(
-      decodeText(server.getBranchFiles(conflictAfterToctou.conflictBranch!)['notes/base.md']),
-    ).toBe('mobile edit');
+    expect(files['notes/base.md']).toBe('desktop concurrent update\nmobile edit');
 
     // Part C: onBeforeCommit injects a concurrent Desktop create right before Mobile's createCommit;
     // FakeGitLabServer rejects duplicate create (400), preserving Desktop, and next sync detects conflict cleanly
@@ -422,13 +427,11 @@ describe('End-to-End Sync Lifecycle (FakeGitLabServer)', () => {
 
     const raceConflict = await raceEngine.sync();
     expect(raceSaveState).toHaveBeenCalledTimes(1);
-    expect(raceConflict.conflictBranch).toBe('mobile-conflict/20261119-062200');
+    expect(raceConflict.conflictBranch).toBeNull();
     expect(decodeText(raceServer.getBranchFiles('main')['notes/race.md'])).toBe(
-      'desktop raced create',
+      'desktop raced create\nmobile raced create',
     );
-    expect(
-      decodeText(raceServer.getBranchFiles(raceConflict.conflictBranch!)['notes/race.md']),
-    ).toBe('mobile raced create');
+    expect(raceVault.files['notes/race.md']).toBe('desktop raced create\nmobile raced create');
 
     // Verify FakeGitLabServer enforces missing-file update/delete (400) and auth (401)
     await expect(
@@ -623,8 +626,15 @@ describe('End-to-End Sync Lifecycle (FakeGitHubServer)', () => {
     files['notes/mobile-note.md'] = 'kept mobile note';
     files['notes/drop-in-merge.md'] = 'mobile draft dropped by desktop merge';
 
-    // 3. Conflict push creates mobile-conflict/<timestamp> from baseCommitSha (startSha)
+    // 3. Fallback conflict push creates mobile-conflict/<timestamp> from baseCommitSha when base raw fetch is 404
+    const rawSpy = vi.spyOn(client, 'getRawText').mockImplementation(async (filePath, ref) => {
+      if (ref === baseCommitSha) {
+        throw new Error('GitHub API error (404): Not Found');
+      }
+      return GitHubClient.prototype.getRawText.call(client, filePath, ref);
+    });
     const conflictRes = await engine.sync();
+    rawSpy.mockRestore();
     expect(conflictRes.conflictBranch).toBe('mobile-conflict/20261119-061500');
     expect(conflictRes.pushed).toBe(3);
     expect(state.activeConflictBranch).toBe('mobile-conflict/20261119-061500');

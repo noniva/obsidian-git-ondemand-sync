@@ -475,11 +475,17 @@ describe('GitLabOnDemandSyncPlugin', () => {
     expect(notices[notices.length - 1].message).toContain('Git sync complete:');
     expect(plugin.lastSyncError).toBeNull();
 
-    // Trigger conflict sync: modify both local and remote
+    // Trigger conflict sync: modify both local and remote, and make base commit raw fetch 404 to exercise fallback Notice
     harness.files.set('note.md', 'local edit');
     server.commitOnBranch('main', 'remote edit', [
       { action: 'update', file_path: 'note.md', content: 'remote edit', encoding: 'text' },
     ]);
+    requestUrlBox.fn = async (req) => {
+      if (req.url.includes(`/raw?ref=${baseSha}`)) {
+        return { status: 404, headers: {}, text: 'Not Found', json: {}, arrayBuffer: new ArrayBuffer(0) };
+      }
+      return server.requestFn(req);
+    };
     await plugin.syncWithNotice();
     const conflictNotice = notices[notices.length - 1];
     expect(conflictNotice.message).toContain('Git sync conflict!');

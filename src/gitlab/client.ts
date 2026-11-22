@@ -9,6 +9,7 @@ import {
 import type {
   CreateCommitParams,
   RemoteCommitAction,
+  RemoteCompareEntry,
   RemoteGitClient,
   RemoteTreeEntry,
 } from '../types';
@@ -81,30 +82,73 @@ export class GitLabClient implements RemoteGitClient {
     return sha;
   }
 
-  /** Fetches all tree entries recursively for a ref, following GitLab `x-next-page` pagination. */
+  /** Fetches all tree entries recursively for a ref, parallelizing pages when `x-total-pages` is known. */
   async getTreeRecursive(
     ref: string,
     onPage?: (info: { page: number; totalPages?: number; entries: number }) => void,
   ): Promise<RemoteTreeEntry[]> {
-    const entries: RemoteTreeEntry[] = [];
     const encodedRef = encodeURIComponent(ref);
-    const seenPages = new Set<string>(['1']);
-    let page = '1';
-
-    while (page) {
+    const fetchPage = async (pageNum: string): Promise<RequestUrlResponse> => {
       const res = await this.request(
-        `/repository/tree?recursive=true&per_page=100&ref=${encodedRef}&page=${encodeURIComponent(page)}`
+        `/repository/tree?recursive=true&per_page=100&ref=${encodedRef}&page=${encodeURIComponent(pageNum)}`,
       );
       if (!Array.isArray(res.json)) {
         throw new Error('GitLab API returned unexpected non-array response for repository tree');
       }
-      entries.push(...(res.json as RemoteTreeEntry[]));
+      return res;
+    };
 
-      const rawTotalPages = getHeaderCaseInsensitive(res.headers, 'x-total-pages')?.trim();
-      const parsedTotal = rawTotalPages ? Number(rawTotalPages) : Number.NaN;
-      const totalPages = Number.isInteger(parsedTotal) && parsedTotal > 0 ? parsedTotal : undefined;
+    const firstRes = await fetchPage('1');
+    const firstEntries = firstRes.json as RemoteTreeEntry[];
+    const rawTotalPages = getHeaderCaseInsensitive(firstRes.headers, 'x-total-pages')?.trim();
+    const parsedTotal = rawTotalPages ? Number(rawTotalPages) : Number.NaN;
+    const totalPages = Number.isInteger(parsedTotal) && parsedTotal > 0 ? parsedTotal : undefined;
+
+    const entries: RemoteTreeEntry[] = [...firstEntries];
+    onPage?.({
+      page: 1,
+      totalPages,
+      entries: entries.length,
+    });
+
+    if (totalPages && totalPages > 1) {
+      const pageResults = new Array<RemoteTreeEntry[]>(totalPages - 1);
+      const remainingPages = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      let nextIdx = 0;
+      let completedPages = 1;
+      const workerCount = Math.min(6, remainingPages.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (nextIdx < remainingPages.length) {
+          const pageNum = remainingPages[nextIdx++];
+          const res = await fetchPage(String(pageNum));
+          const pageEntries = res.json as RemoteTreeEntry[];
+          pageResults[pageNum - 2] = pageEntries;
+          completedPages++;
+          onPage?.({
+            page: completedPages,
+            totalPages,
+            entries: entries.length + pageEntries.length,
+          });
+        }
+      });
+      await Promise.all(workers);
+      for (const pageEntries of pageResults) {
+        entries.push(...pageEntries);
+      }
+      return entries;
+    }
+
+    const seenPages = new Set<string>(['1']);
+    let page = getHeaderCaseInsensitive(firstRes.headers, 'x-next-page')?.trim() ?? '';
+    if (page) {
+      seenPages.add(page);
+    }
+
+    while (page) {
+      const res = await fetchPage(page);
+      entries.push(...(res.json as RemoteTreeEntry[]));
       onPage?.({
-        page: Number(page) || seenPages.size,
+        page: seenPages.size,
         totalPages,
         entries: entries.length,
       });
@@ -117,6 +161,95 @@ export class GitLabClient implements RemoteGitClient {
         seenPages.add(nextPage);
       }
       page = nextPage;
+    }
+
+    return entries;
+  }
+
+  /**
+   * Compares two refs via GitLab `/repository/compare` and resolves `blobSha` for changed files.
+   * Returns `null` on 404, timeout, or >= 100 diffs so callers can fall back to `getTreeRecursive`.
+   */
+  async compareCommits(fromRef: string, toRef: string): Promise<RemoteCompareEntry[] | null> {
+    let res: RequestUrlResponse;
+    try {
+      res = await this.request(
+        `/repository/compare?from=${encodeURIComponent(fromRef)}&to=${encodeURIComponent(toRef)}`,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('(404)')) {
+        return null;
+      }
+      throw err;
+    }
+
+    const data = res.json as {
+      compare_timeout?: boolean;
+      diffs?: Array<{
+        old_path?: string;
+        new_path?: string;
+        new_file?: boolean;
+        renamed_file?: boolean;
+        deleted_file?: boolean;
+      }>;
+    } | null;
+
+    if (!data || data.compare_timeout === true || !Array.isArray(data.diffs)) {
+      return null;
+    }
+    if (data.diffs.length >= 100) {
+      return null;
+    }
+
+    const entries: RemoteCompareEntry[] = [];
+    for (const d of data.diffs) {
+      const newPath = d.new_path ?? d.old_path;
+      if (!newPath) {
+        continue;
+      }
+      if (d.deleted_file) {
+        entries.push({ path: d.old_path ?? newPath, status: 'deleted' });
+      } else if (d.renamed_file && d.old_path && d.old_path !== newPath) {
+        entries.push({ path: newPath, previousPath: d.old_path, status: 'renamed' });
+      } else if (d.new_file) {
+        entries.push({ path: newPath, status: 'added' });
+      } else {
+        entries.push({ path: newPath, status: 'modified' });
+      }
+    }
+
+    const needBlob = entries.filter((e) => e.status !== 'deleted');
+    if (needBlob.length > 0) {
+      let nextIdx = 0;
+      let missingBlob = false;
+      const encodedToRef = encodeURIComponent(toRef);
+      const workerCount = Math.min(6, needBlob.length);
+      const workers = Array.from({ length: workerCount }, async () => {
+        while (!missingBlob && nextIdx < needBlob.length) {
+          const entry = needBlob[nextIdx++];
+          try {
+            const meta = await this.request(
+              `/repository/files/${encodeURIComponent(entry.path)}?ref=${encodedToRef}`,
+            );
+            const blobId = (meta.json as { blob_id?: string } | null)?.blob_id;
+            if (!blobId) {
+              missingBlob = true;
+              return;
+            }
+            entry.blobSha = blobId;
+          } catch (err) {
+            if (err instanceof Error && err.message.includes('(404)')) {
+              missingBlob = true;
+              return;
+            }
+            throw err;
+          }
+        }
+      });
+      await Promise.all(workers);
+      if (missingBlob) {
+        return null;
+      }
     }
 
     return entries;

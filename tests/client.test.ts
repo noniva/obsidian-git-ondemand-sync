@@ -525,4 +525,86 @@ describe('sendRemoteRequest', () => {
     expect(nonRateLimitReq).toHaveBeenCalledTimes(1);
     expect(nonRateLimitSleep).not.toHaveBeenCalled();
   });
+
+  it('fetches GitLab tree pages 2..N concurrently when x-total-pages > 1', async () => {
+    const clientCfg = { baseUrl: 'https://gitlab.com', projectId: 'user/repo', token: 'tok' };
+    const req = vi.fn(async ({ url }: { url: string }) => {
+      if (url.includes('&page=1')) {
+        return {
+          status: 200,
+          text: '',
+          arrayBuffer: new ArrayBuffer(0),
+          headers: { 'x-total-pages': '3', 'x-next-page': '2' },
+          json: [{ id: 'b1', name: '1.md', type: 'blob', path: '1.md', mode: '100644' }],
+        };
+      }
+      if (url.includes('&page=2')) {
+        return {
+          status: 200,
+          text: '',
+          arrayBuffer: new ArrayBuffer(0),
+          headers: { 'x-total-pages': '3', 'x-next-page': '3' },
+          json: [{ id: 'b2', name: '2.md', type: 'blob', path: '2.md', mode: '100644' }],
+        };
+      }
+      return {
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        headers: { 'x-total-pages': '3', 'x-next-page': '' },
+        json: [{ id: 'b3', name: '3.md', type: 'blob', path: '3.md', mode: '100644' }],
+      };
+    });
+
+    const client = new GitLabClient(clientCfg, req);
+    const entries = await client.getTreeRecursive('head1');
+    expect(entries.map((e) => e.path)).toEqual(['1.md', '2.md', '3.md']);
+    expect(req).toHaveBeenCalledTimes(3);
+  });
+
+  it('compares commits via GitLab /repository/compare and returns null on timeout or 404', async () => {
+    const clientCfg = { baseUrl: 'https://gitlab.com', projectId: 'user/repo', token: 'tok' };
+    const req = vi.fn(async ({ url }: { url: string }) => {
+      if (url.includes('/repository/compare')) {
+        return {
+          status: 200,
+          text: '',
+          arrayBuffer: new ArrayBuffer(0),
+          headers: {},
+          json: {
+            compare_timeout: false,
+            diffs: [
+              { old_path: 'a.md', new_path: 'a.md', new_file: false, renamed_file: false, deleted_file: false },
+              { old_path: 'old.md', new_path: 'new.md', new_file: false, renamed_file: true, deleted_file: false },
+              { old_path: 'gone.md', new_path: 'gone.md', new_file: false, renamed_file: false, deleted_file: true },
+            ],
+          },
+        };
+      }
+      if (url.includes('/repository/files/a.md?ref=c2')) {
+        return { status: 200, text: '', arrayBuffer: new ArrayBuffer(0), headers: {}, json: { blob_id: 'sha-a' } };
+      }
+      return { status: 200, text: '', arrayBuffer: new ArrayBuffer(0), headers: {}, json: { blob_id: 'sha-new' } };
+    });
+
+    const client = new GitLabClient(clientCfg, req);
+    const changes = await client.compareCommits('c1', 'c2');
+    expect(changes).toEqual([
+      { path: 'a.md', status: 'modified', blobSha: 'sha-a' },
+      { path: 'new.md', previousPath: 'old.md', status: 'renamed', blobSha: 'sha-new' },
+      { path: 'gone.md', status: 'deleted' },
+    ]);
+
+    const timeoutClient = new GitLabClient(
+      clientCfg,
+      vi.fn().mockResolvedValue({
+        status: 200,
+        text: '',
+        arrayBuffer: new ArrayBuffer(0),
+        headers: {},
+        json: { compare_timeout: true, diffs: [] },
+      }),
+    );
+    expect(await timeoutClient.compareCommits('c1', 'c2')).toBeNull();
+  });
 });

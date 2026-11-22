@@ -7,6 +7,7 @@ import type {
 } from '../types';
 import { isIgnoredPath, isImagePath, isTextSyncPath, sha256Hex } from '../utils/paths';
 import { computeSyncPlan, type LocalFileSnapshot, type SyncPlan } from './diff';
+import { mergeThreeWayKeepBoth } from './merge';
 
 export interface VaultTextAdapter {
   listTextFiles(): Promise<string[]>;
@@ -34,7 +35,7 @@ export interface SyncEngineOptions {
   settings: PluginSettings;
   state: SyncState;
   client: Pick<RemoteGitClient, 'getBranchHead' | 'getTreeRecursive' | 'getRawText' | 'createCommit'> &
-    Partial<Pick<RemoteGitClient, 'getRawTextsBatch'>>;
+    Partial<Pick<RemoteGitClient, 'getRawTextsBatch' | 'compareCommits'>>;
   vault: VaultTextAdapter;
   saveState: () => Promise<void> | void;
   now?: () => Date;
@@ -154,33 +155,7 @@ export class SyncEngine {
 
     this.emitProgress({ stage: 'checking', message: 'Checking remote branch...' });
     const headSha = await this.client.getBranchHead(this.settings.branch);
-    const tree = await this.client.getTreeRecursive(headSha, (info) => {
-      this.emitProgress({
-        stage: 'tree',
-        message: info.totalPages
-          ? `Scanning repository (page ${info.page}/${info.totalPages}, ${info.entries} items)...`
-          : `Scanning repository (page ${info.page}, ${info.entries} items)...`,
-        current: info.page,
-        total: info.totalPages,
-      });
-    });
-
-    const remoteTextFiles: Record<string, string> = {};
-    const remoteImagePaths: string[] = [];
-
-    for (const entry of tree) {
-      if (
-        entry.type !== 'blob' ||
-        isIgnoredPath(entry.path, this.settings.syncObsidianDir, this.configDir)
-      ) {
-        continue;
-      }
-      if (isTextSyncPath(entry.path, this.settings.textAllowlist)) {
-        remoteTextFiles[entry.path] = entry.id;
-      } else if (isImagePath(entry.path)) {
-        remoteImagePaths.push(entry.path);
-      }
-    }
+    const { remoteTextFiles, remoteImagePaths } = await this.resolveRemoteSnapshot(headSha);
 
     let conflictTree: RemoteTreeEntry[] | null = null;
     if (this.state.activeConflictBranch) {
@@ -228,6 +203,16 @@ export class SyncEngine {
 
     if (plan.conflicts.length > 0) {
       await this.resolveConvergedConflicts(plan, headSha, remoteTextFiles, localHashes);
+    }
+
+    if (plan.conflicts.length > 0 && !this.state.activeConflictBranch) {
+      await this.resolveAutoMergeConflicts(
+        plan,
+        headSha,
+        remoteTextFiles,
+        localContents,
+        localHashes,
+      );
     }
 
     await this.applyPulls(plan, headSha, remoteTextFiles);
@@ -389,6 +374,109 @@ export class SyncEngine {
     return localHash === undefined;
   }
 
+  private async resolveRemoteSnapshot(headSha: string): Promise<{
+    remoteTextFiles: Record<string, string>;
+    remoteImagePaths: string[];
+  }> {
+    const baseSha = this.state.lastSyncedCommitSha;
+    const hasTrackedBaseline =
+      Object.keys(this.state.files).length > 0 || this.state.remoteImagePaths.length > 0;
+
+    if (baseSha !== null && hasTrackedBaseline && headSha === baseSha) {
+      const remoteTextFiles: Record<string, string> = {};
+      for (const [path, entry] of Object.entries(this.state.files)) {
+        if (this.isAllowlistedText(path)) {
+          remoteTextFiles[path] = entry.blobSha;
+        }
+      }
+      const remoteImagePaths = this.state.remoteImagePaths.filter(
+        (path) => !isIgnoredPath(path, this.settings.syncObsidianDir, this.configDir),
+      );
+      return { remoteTextFiles, remoteImagePaths };
+    }
+
+    if (baseSha !== null && hasTrackedBaseline && typeof this.client.compareCommits === 'function') {
+      const changes = await this.client.compareCommits(baseSha, headSha);
+      if (changes !== null) {
+        const remoteTextFiles: Record<string, string> = {};
+        for (const [path, entry] of Object.entries(this.state.files)) {
+          if (this.isAllowlistedText(path)) {
+            remoteTextFiles[path] = entry.blobSha;
+          }
+        }
+        const imageSet = new Set(
+          this.state.remoteImagePaths.filter(
+            (path) => !isIgnoredPath(path, this.settings.syncObsidianDir, this.configDir),
+          ),
+        );
+
+        let needsFullScan = false;
+        for (const change of changes) {
+          if (change.previousPath) {
+            delete remoteTextFiles[change.previousPath];
+            imageSet.delete(change.previousPath);
+          }
+          if (change.status === 'deleted') {
+            delete remoteTextFiles[change.path];
+            imageSet.delete(change.path);
+            continue;
+          }
+          if (isIgnoredPath(change.path, this.settings.syncObsidianDir, this.configDir)) {
+            continue;
+          }
+          if (isTextSyncPath(change.path, this.settings.textAllowlist)) {
+            if (!change.blobSha) {
+              needsFullScan = true;
+              break;
+            }
+            remoteTextFiles[change.path] = change.blobSha;
+            imageSet.delete(change.path);
+          } else if (isImagePath(change.path)) {
+            imageSet.add(change.path);
+            delete remoteTextFiles[change.path];
+          }
+        }
+
+        if (!needsFullScan) {
+          return {
+            remoteTextFiles,
+            remoteImagePaths: Array.from(imageSet),
+          };
+        }
+      }
+    }
+
+    const tree = await this.client.getTreeRecursive(headSha, (info) => {
+      this.emitProgress({
+        stage: 'tree',
+        message: info.totalPages
+          ? `Scanning repository (page ${info.page}/${info.totalPages}, ${info.entries} items)...`
+          : `Scanning repository (page ${info.page}, ${info.entries} items)...`,
+        current: info.page,
+        total: info.totalPages,
+      });
+    });
+
+    const remoteTextFiles: Record<string, string> = {};
+    const remoteImagePaths: string[] = [];
+
+    for (const entry of tree) {
+      if (
+        entry.type !== 'blob' ||
+        isIgnoredPath(entry.path, this.settings.syncObsidianDir, this.configDir)
+      ) {
+        continue;
+      }
+      if (isTextSyncPath(entry.path, this.settings.textAllowlist)) {
+        remoteTextFiles[entry.path] = entry.id;
+      } else if (isImagePath(entry.path)) {
+        remoteImagePaths.push(entry.path);
+      }
+    }
+
+    return { remoteTextFiles, remoteImagePaths };
+  }
+
   private mergeRemoteImagePaths(collected: string[], initialRemoteImages: Set<string>): void {
     const addedDuringSync = this.state.remoteImagePaths.filter((p) => !initialRemoteImages.has(p));
     this.state.remoteImagePaths = Array.from(new Set([...collected, ...addedDuringSync])).sort();
@@ -428,6 +516,114 @@ export class SyncEngine {
     if (!this.state.activeConflictBranch) {
       plan.targetPushBranch = plan.hasConflict ? 'conflict' : 'target';
     }
+  }
+
+  private async fetchOptionalRawText(path: string, ref: string): Promise<string | null> {
+    try {
+      const text = await this.client.getRawText(path, ref);
+      return typeof text === 'string' ? text : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Auto-merges conflicting text files by keeping all lines from both Remote and Local,
+   * preserving edited files over deletions, and falling back to `mobile-conflict` if base/remote cannot be fetched.
+   */
+  private async resolveAutoMergeConflicts(
+    plan: SyncPlan,
+    headSha: string,
+    remoteTextFiles: Record<string, string>,
+    localContents: Record<string, string>,
+    localHashes: LocalFileSnapshot,
+  ): Promise<void> {
+    const resolvedPaths = new Set<string>();
+    const convergedToRemote = new Set<string>();
+    const promoteCreateToUpdate = new Set<string>();
+    const restoreFromRemote = new Set<string>();
+
+    for (const path of plan.conflicts) {
+      const remoteSha = remoteTextFiles[path];
+      const localText = localContents[path];
+
+      if (remoteSha === undefined && localText !== undefined) {
+        resolvedPaths.add(path);
+        continue;
+      }
+
+      if (remoteSha !== undefined && localText === undefined) {
+        resolvedPaths.add(path);
+        restoreFromRemote.add(path);
+        continue;
+      }
+
+      if (remoteSha === undefined || localText === undefined) {
+        continue;
+      }
+
+      const remoteText = await this.fetchOptionalRawText(path, headSha);
+      if (remoteText === null) {
+        continue;
+      }
+
+      let baseText = '';
+      if (this.state.files[path]) {
+        if (!this.state.lastSyncedCommitSha) {
+          continue;
+        }
+        const fetchedBase = await this.fetchOptionalRawText(path, this.state.lastSyncedCommitSha);
+        if (fetchedBase === null) {
+          continue;
+        }
+        baseText = fetchedBase;
+      }
+
+      const mergedText = mergeThreeWayKeepBoth(baseText, remoteText, localText);
+      const mergedHash = await sha256Hex(mergedText);
+      if (mergedText !== localText) {
+        await this.vault.writeText(path, mergedText);
+        localContents[path] = mergedText;
+        localHashes[path] = mergedHash;
+      }
+
+      resolvedPaths.add(path);
+      if (mergedText === remoteText) {
+        convergedToRemote.add(path);
+        this.state.files[path] = {
+          blobSha: remoteSha,
+          contentHash: mergedHash,
+        };
+      } else if (plan.pushCreates.includes(path)) {
+        // Remote already has this path; pushing merged content must update rather than create.
+        promoteCreateToUpdate.add(path);
+      }
+    }
+
+    if (resolvedPaths.size === 0) {
+      return;
+    }
+
+    plan.conflicts = plan.conflicts.filter((p) => !resolvedPaths.has(p));
+    plan.pushCreates = plan.pushCreates.filter(
+      (p) => !convergedToRemote.has(p) && !promoteCreateToUpdate.has(p),
+    );
+    plan.pushUpdates = plan.pushUpdates.filter((p) => !convergedToRemote.has(p));
+    for (const path of promoteCreateToUpdate) {
+      if (!plan.pushUpdates.includes(path)) {
+        plan.pushUpdates.push(path);
+      }
+    }
+    plan.pushUpdates.sort();
+    plan.pushDeletes = plan.pushDeletes.filter((p) => !restoreFromRemote.has(p));
+    for (const path of restoreFromRemote) {
+      if (!plan.pullDownloads.includes(path)) {
+        plan.pullDownloads.push(path);
+      }
+    }
+    plan.pullDownloads.sort();
+    plan.hasConflict = plan.conflicts.length > 0;
+    plan.targetPushBranch = plan.hasConflict ? 'conflict' : 'target';
   }
 
   private async buildReconciledConflictActionsAsync(
@@ -655,11 +851,23 @@ export class SyncEngine {
         actions,
       });
 
-      const updatedTree = await this.client.getTreeRecursive(newHeadSha);
       const updatedBlobs = new Map<string, string>();
-      for (const entry of updatedTree) {
-        if (entry.type === 'blob') {
-          updatedBlobs.set(entry.path, entry.id);
+      const pushedDiffs =
+        typeof this.client.compareCommits === 'function'
+          ? await this.client.compareCommits(headSha, newHeadSha)
+          : null;
+      if (pushedDiffs !== null) {
+        for (const entry of pushedDiffs) {
+          if (entry.status !== 'deleted' && entry.blobSha) {
+            updatedBlobs.set(entry.path, entry.blobSha);
+          }
+        }
+      } else {
+        const updatedTree = await this.client.getTreeRecursive(newHeadSha);
+        for (const entry of updatedTree) {
+          if (entry.type === 'blob') {
+            updatedBlobs.set(entry.path, entry.id);
+          }
         }
       }
 
