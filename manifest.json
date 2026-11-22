@@ -1,7 +1,7 @@
 {
   "id": "gitlab-ondemand-sync",
   "name": "Git On-Demand Sync",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "minAppVersion": "1.4.0",
   "description": "Sync text-only vault files with a private GitHub or GitLab repository via REST API and load/upload images on-demand in memory with zero mobile disk storage.",
   "author": "Noniva",

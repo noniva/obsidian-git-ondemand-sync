@@ -1,6 +1,6 @@
 {
   "name": "gitlab-ondemand-sync",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Obsidian plugin that syncs text-only files with a private GitLab repository and loads/uploads images on-demand in memory with zero mobile disk storage.",
   "main": "main.js",
   "scripts": {
